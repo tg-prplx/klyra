@@ -1269,9 +1269,16 @@ func buildProviderWithBaseURL(name, model, baseURL string) (llm.Provider, string
 			model = os.Getenv("OPENAI_MODEL")
 		}
 		return provider, model, nil
-	case "chat", "chat-completions", "openai-chat", "openai-compatible":
+	case "local", "chat", "chat-completions", "openai-chat", "openai-compatible":
+		if strings.TrimSpace(baseURL) == "" {
+			baseURL = os.Getenv("LOCAL_BASE_URL")
+		}
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = os.Getenv("OPENAI_BASE_URL")
+		}
+		if strings.TrimSpace(baseURL) == "" && normalized == "local" {
+			// Sensible default for local testing if not using Ollama
+			baseURL = "http://localhost:8080/v1"
 		}
 		provider, err := llm.NewOpenAIProvider(os.Getenv("OPENAI_API_KEY"), baseURL)
 		if err != nil {
@@ -1279,6 +1286,9 @@ func buildProviderWithBaseURL(name, model, baseURL string) (llm.Provider, string
 		}
 		if strings.TrimSpace(model) == "" || model == "mock-agent" {
 			model = os.Getenv("OPENAI_MODEL")
+			if model == "" {
+				model = "local-model" // fallback so it doesn't fail
+			}
 		}
 		return provider, model, nil
 	case "ollama":

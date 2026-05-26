@@ -180,7 +180,7 @@ func ProviderPicker(current string) PickerModal {
 	return NewPicker("Provider", "provider", current, []PickerOption{
 		{Value: "mock", Label: "Mock", Description: "local testing, no API key"},
 		{Value: "openai", Label: "OpenAI", Description: "Responses API"},
-		{Value: "chat", Label: "Chat", Description: "OpenAI-compatible Chat API"},
+		{Value: "local", Label: "Local", Description: "OpenAI-compatible local server (LMStudio, vLLM, etc)"},
 		{Value: "ollama", Label: "Ollama", Description: "local models"},
 		{Value: "anthropic", Label: "Anthropic", Description: "Claude models"},
 		{Value: "gemini", Label: "Gemini", Description: "Google Gemini models"},

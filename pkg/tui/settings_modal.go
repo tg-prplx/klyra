@@ -55,7 +55,7 @@ func NewSettingsModal(
 ) SettingsModal {
 	fields := []settingsField{
 		// Provider section
-		{Section: secProvider, Name: "provider", DisplayName: "Provider", Value: provider, Choices: []string{"mock", "openai", "chat", "ollama", "anthropic", "gemini"}},
+		{Section: secProvider, Name: "provider", DisplayName: "Provider", Value: provider, Choices: []string{"mock", "openai", "local", "ollama", "anthropic", "gemini"}},
 		{Section: secProvider, Name: "model", DisplayName: "Model", Value: model},
 		{Section: secProvider, Name: "endpoint", DisplayName: "Endpoint", Value: endpoint},
 		{Section: secProvider, Name: "reasoning", DisplayName: "Reasoning", Value: reasoning, Choices: []string{"", "minimal", "low", "medium", "high"}},
