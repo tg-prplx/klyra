@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -153,6 +154,7 @@ type Model struct {
 	renderer        *glamour.TermRenderer
 	approvalReq     *ApprovalRequestMsg
 	spinnerFrame    int
+	viewport        viewport.Model
 
 	// Modal state
 	activeModal   modalKind
@@ -219,11 +221,12 @@ func New(cfg Config) Model {
 		selectedCmdIdx:  0,
 		renderer:        renderer,
 		lines:           []string{},
+		viewport:        viewport.New(0, 0),
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tickSpinner()
+	return nil
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -236,12 +239,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			glamour.WithStandardStyle("dark"),
 			glamour.WithWordWrap(max(40, m.width-8)),
 		)
+		m.syncViewport(true)
 		return m, nil
 	case spinnerTickMsg:
 		if m.busy {
 			m.spinnerFrame = (m.spinnerFrame + 1) % animTotalFrames
+			m.syncViewport(false)
+			return m, tickSpinner()
 		}
-		return m, tickSpinner()
+		return m, nil
 	case tea.KeyMsg:
 		// Approval prompt takes highest priority
 		if m.approvalReq != nil {
@@ -270,6 +276,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "f2", "ctrl+s":
 			m.openSettingsModal()
+			return m, nil
+		case "pgup":
+			m.viewport.PageUp()
+			return m, nil
+		case "pgdn":
+			m.viewport.PageDown()
+			return m, nil
+		case "ctrl+up", "shift+up":
+			m.viewport.LineUp(1)
+			return m, nil
+		case "ctrl+down", "shift+down":
+			m.viewport.LineDown(1)
 			return m, nil
 		case "up", "shift+tab":
 			if len(m.filteredCmds) > 0 {
@@ -314,13 +332,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lines = append(m.lines, "")
 			}
 			m.lines = append(m.lines, "you: "+value)
-			return m, runHandler(m.handler, value)
+			m.syncViewport(true)
+			return m, tea.Batch(runHandler(m.handler, value), tickSpinner())
 		}
 	case StreamMsg:
 		m.streamBuf += string(msg)
+		m.syncViewport(true)
 		return m, nil
 	case ApprovalRequestMsg:
 		m.approvalReq = &msg
+		m.syncViewport(true)
 		return m, nil
 	case responseMsg:
 		m.busy = false
@@ -384,6 +405,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				flushAssistant()
 			}
 		}
+		m.syncViewport(true)
 		return m, nil
 	}
 
@@ -395,7 +417,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateCompletions()
 	}
 
-	return m, cmd
+	var vpCmd tea.Cmd
+	m.viewport, vpCmd = m.viewport.Update(msg)
+	m.syncViewport(false)
+
+	return m, tea.Batch(cmd, vpCmd)
 }
 
 func (m *Model) updateCompletions() {
@@ -411,14 +437,28 @@ func (m *Model) updateCompletions() {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// View
-// ---------------------------------------------------------------------------
+func (m Model) calculateBodyHeight() int {
+	footerHeight := 2 // separator + footer text
+	inputHeight := 2  // separator + input text
+	autocompleteHeight := 0
+	if len(m.filteredCmds) > 0 {
+		maxItems := 5
+		itemsCount := len(m.filteredCmds)
+		if itemsCount > maxItems {
+			itemsCount = maxItems
+		}
+		autocompleteHeight = itemsCount + 3
+	}
+	bodyHeight := m.height - footerHeight - inputHeight - autocompleteHeight
+	if bodyHeight < 5 {
+		bodyHeight = 5
+	}
+	return bodyHeight
+}
 
-func (m Model) View() string {
+func (m Model) buildFormattedLines() []string {
 	headerLines := strings.Split(m.renderHeader(), "\n")
 
-	// Chat history
 	var formattedLines []string
 	formattedLines = append(formattedLines, headerLines...)
 	formattedLines = append(formattedLines, "") // breathing room after header
@@ -435,6 +475,16 @@ func (m Model) View() string {
 			formattedLines = append(formattedLines, errorMsgStyle.Render("  "+errorPrefix+" "+line[7:]))
 		} else if strings.HasPrefix(line, "system: ") {
 			formattedLines = append(formattedLines, systemMsgStyle.Render("  "+systemPrefix+" "+line[8:]))
+		} else if strings.HasPrefix(line, "tool: ") {
+			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorEmerald).Render("  🛠️  "+line))
+		} else if strings.HasPrefix(line, "tool rejected: ") {
+			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  ❌ "+line))
+		} else if strings.HasPrefix(line, "tool error: ") {
+			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  ⚠️  "+line))
+		} else if strings.HasPrefix(line, "usage: ") {
+			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorDim).Render("  📊 "+line))
+		} else if strings.HasPrefix(line, "policy: ") {
+			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorAmber).Render("  🛡️  "+line))
 		} else if line == "" {
 			formattedLines = append(formattedLines, "")
 		} else {
@@ -465,48 +515,53 @@ func (m Model) View() string {
 			formattedLines = append(formattedLines, agentBarStyle.Render(agentBar)+" "+agentMsgStyle.Render(al)+"\x1b[0m")
 		}
 	} else if m.busy {
-		// Pulsing gradient bar animation
 		formattedLines = append(formattedLines, "")
 		formattedLines = append(formattedLines, m.renderThinkingBar())
 	}
 
+	return formattedLines
+}
+
+func (m *Model) syncViewport(scrollToBottom bool) {
+	m.viewport.Width = m.width
+	m.viewport.Height = m.calculateBodyHeight()
+
+	lines := m.buildFormattedLines()
+	padding := m.viewport.Height - len(lines)
+	if padding > 0 {
+		paddedLines := make([]string, padding)
+		for i := range paddedLines {
+			paddedLines[i] = ""
+		}
+		lines = append(paddedLines, lines...)
+	}
+
+	m.viewport.SetContent(strings.Join(lines, "\n"))
+	if scrollToBottom {
+		m.viewport.GotoBottom()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// View
+// ---------------------------------------------------------------------------
+
+func (m Model) View() string {
 	// Autocomplete
 	var autocomplete string
-	autocompleteHeight := 0
 	if len(m.filteredCmds) > 0 {
-		autocomplete, autocompleteHeight = m.renderAutocomplete()
+		autocomplete, _ = m.renderAutocomplete()
 	}
 
 	// Footer
 	footer := m.renderFooter()
-	footerHeight := lipgloss.Height(footer)
 
 	// Input with separator
 	inputSep := lipgloss.NewStyle().Foreground(colorSeparator).Render(strings.Repeat("─", max(10, m.width)))
 	inputView := inputSep + "\n" + m.input.View()
-	inputHeight := 2
 
-	// Calculate layout
-	bodyHeight := m.height - footerHeight - inputHeight
-	if autocompleteHeight > 0 {
-		bodyHeight -= autocompleteHeight
-	}
-
-	if bodyHeight < 5 {
-		bodyHeight = 5
-	}
-
-	bodyLines := visibleTail(formattedLines, bodyHeight)
-
-	// Push content to the bottom
-	padding := bodyHeight - len(bodyLines)
-	if padding > 0 {
-		for i := 0; i < padding; i++ {
-			bodyLines = append([]string{""}, bodyLines...)
-		}
-	}
-
-	body := strings.Join(bodyLines, "\n")
+	// Body from viewport
+	body := m.viewport.View()
 
 	// Overlays: approval prompt
 	if m.approvalReq != nil {
@@ -1060,7 +1115,7 @@ func (m *Model) handleLocalCommand(value string) (bool, tea.Cmd) {
 			m.lines = append(m.lines, "")
 		}
 		m.lines = append(m.lines, "you: "+value)
-		return true, runHandler(m.handler, value)
+		return true, tea.Batch(runHandler(m.handler, value), tickSpinner())
 	}
 
 	return false, nil

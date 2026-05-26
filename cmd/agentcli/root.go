@@ -461,7 +461,7 @@ func newTUICommand(opts *options) *cobra.Command {
 				Handler:         handler,
 				Commands:        tuiCommands,
 			})
-			p = tea.NewProgram(tuiModel)
+			p = tea.NewProgram(tuiModel, tea.WithAltScreen())
 			_, err = p.Run()
 			return err
 		},

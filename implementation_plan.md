@@ -56,6 +56,39 @@
 ### 5. `pkg/context` (Менеджер контекста)
 Управление историей сообщений, обрезка старых сообщений (sliding window) и упаковка контекста для максимизации cache hit rate.
 
+## TUI Scrolling and Text Selection Fix
+
+### 1. Viewport Integration
+- Import `"github.com/charmbracelet/bubbles/viewport"` in `pkg/tui/model.go`.
+- Add `viewport viewport.Model` to `Model` struct.
+- In `New()`, initialize the viewport: `viewport: viewport.New(0, 0)`.
+- In `Update()`, on `tea.WindowSizeMsg`, set `m.viewport.Width = msg.Width` and `m.viewport.Height = m.calculateBodyHeight()`.
+
+### 2. Eliminating Idle Redraws (Fixing Text Selection Drops)
+- Modify `spinnerTickMsg` handler to only return `tickSpinner()` when `m.busy` is true. When `m.busy` is false, do not tick the spinner anymore.
+- Trigger `tickSpinner()` when `m.busy` is set to true (e.g. on `enter` key or other handler starts).
+- This stops the 100ms idle redrawing, making the screen 100% static when idle, allowing the terminal's native selection to work flawlessly.
+
+### 3. Viewport Scrolling Keybindings
+- Forward key messages to `m.viewport.Update(msg)` at the bottom of the main `Update()` function.
+- In the `tea.KeyMsg` switch-case:
+  - If autocomplete is active (`len(m.filteredCmds) > 0`), intercept `up` / `down` / `tab` / `shift+tab` to control autocomplete selection.
+  - If autocomplete is not active, allow `up` / `down` arrow keys to scroll the viewport.
+  - Map `ctrl+up` / `shift+up` to scroll the viewport up (`LineUp(1)`).
+  - Map `ctrl+down` / `shift+down` to scroll the viewport down (`LineDown(1)`).
+  - Map `pgup` / `pgdown` to scroll the viewport page up/down.
+
+### 4. Enable AltScreen
+- In `cmd/agentcli/root.go`, initialize `tea.NewProgram` with `tea.WithAltScreen()` option. This locks the application in AltScreen mode, ensuring headers/footers stay sticky at the top/bottom while the viewport scrolls the history, and native text selection works without getting messed up by the terminal buffer.
+
+### 5. Formatting for `tool:` and `usage:` lines
+- In `View()`, check lines for prefixes:
+  - `tool:` -> render as `  🛠️  tool: <tool_name>` in emerald color.
+  - `tool rejected:` -> render as `  ❌ tool rejected: <reason>` in bold red.
+  - `tool error:` -> render as `  ⚠️  tool error: <error>` in bold red.
+  - `usage:` -> render as `  📊 usage: <stats>` in dim gray.
+  - `policy:` -> render as `  🛡️  policy: <details>` in amber.
+
 ## Verification Plan
 
 ### Automated Tests
