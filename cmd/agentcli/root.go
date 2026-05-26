@@ -283,11 +283,13 @@ func newTUICommand(opts *options) *cobra.Command {
 						return fmt.Sprintf("compacted: messages %d -> %d, estimated tokens %d -> %d",
 							stats.OriginalMessages, stats.PackedMessages, stats.OriginalTokens, stats.PackedTokens), nil
 					case "/settings":
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/set":
 						if err := applyTUISet(&runtimeCfg, args[1:]); err != nil {
 							return "", err
 						}
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/provider":
 						if len(args) < 2 {
@@ -298,24 +300,28 @@ func newTUICommand(opts *options) *cobra.Command {
 						if runtimeCfg.Provider == "mock" {
 							runtimeCfg.Model = "mock-agent"
 						}
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/model":
 						if len(args) < 2 {
 							return "usage: /model <model-name>", nil
 						}
 						runtimeCfg.Model = strings.Join(args[1:], " ")
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/endpoint":
 						if len(args) < 2 {
 							return "usage: /endpoint <base-url>", nil
 						}
 						setProviderBaseURL(&runtimeCfg, runtimeCfg.Provider, strings.Join(args[1:], " "))
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/reasoning":
 						if len(args) < 2 {
 							return "usage: /reasoning minimal|low|medium|high", nil
 						}
 						runtimeCfg.Reasoning = args[1]
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/limits":
 						if len(args) == 1 {
@@ -324,24 +330,28 @@ func newTUICommand(opts *options) *cobra.Command {
 						if err := applyTUILimit(&runtimeCfg, args[1:]); err != nil {
 							return "", err
 						}
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/approval":
 						if len(args) < 2 {
 							return "usage: /approval auto|ask|never", nil
 						}
 						runtimeCfg.ApprovalMode = args[1]
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/sandbox":
 						if len(args) < 2 {
 							return "usage: /sandbox read-only|workspace-write|danger-full-access", nil
 						}
 						runtimeCfg.Sandbox = args[1]
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/mode":
 						if len(args) < 2 {
 							return "usage: /mode inspect|edit|repair|refactor", nil
 						}
 						runtimeCfg.Mode = args[1]
+						_ = runtimeCfg.Save(opts.configPath)
 						return formatTUISettings(runtimeCfg, pendingAttachments), nil
 					case "/cart":
 						if len(args) >= 3 && args[1] == "add" {

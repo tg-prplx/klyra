@@ -174,10 +174,11 @@ func New(cfg Config) Model {
 	input.PromptStyle = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
 	input.TextStyle = lipgloss.NewStyle().Foreground(colorText)
 	input.Cursor.Style = lipgloss.NewStyle().Foreground(colorBrand)
+	input.Cursor.Blink = false
 	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
 	input.Focus()
 	input.CharLimit = 8000
-
+	
 	title := cfg.Title
 	if strings.TrimSpace(title) == "" {
 		title = "Klyra"
@@ -222,7 +223,7 @@ func New(cfg Config) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, tickSpinner())
+	return tickSpinner()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -322,7 +323,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.approvalReq = &msg
 		return m, nil
 	case responseMsg:
-		hadStream := strings.TrimSpace(m.streamBuf) != ""
 		m.busy = false
 		m.streamBuf = ""
 		m.err = msg.err
@@ -330,22 +330,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lines = append(m.lines, "")
 			m.lines = append(m.lines, "error: "+msg.err.Error())
 		}
-		shouldRenderOutput := strings.TrimSpace(msg.output) != ""
-		if hadStream && msg.err == nil && !strings.Contains(msg.output, "tool:") && !strings.Contains(msg.output, "usage:") {
-			shouldRenderOutput = false
-		}
-		if shouldRenderOutput {
+
+		outText := strings.TrimSpace(msg.output)
+		if outText != "" {
 			m.lines = append(m.lines, "")
 
-			if m.renderer != nil {
-				rendered, errRender := m.renderer.Render(strings.TrimSpace(msg.output))
-				if errRender == nil {
-					m.lines = append(m.lines, "agent: "+strings.TrimRight(rendered, " \n\r\t")+"\x1b[0m")
-				} else {
-					m.lines = append(m.lines, "agent: "+strings.TrimRight(msg.output, " \n\r\t")+"\x1b[0m")
+			isAgentStream := strings.Contains(outText, "assistant: ") || strings.Contains(outText, "tool: ")
+			if !isAgentStream {
+				text := outText
+				if m.renderer != nil && strings.HasPrefix(text, "#") {
+					if rendered, errRender := m.renderer.Render(text); errRender == nil {
+						text = strings.TrimRight(rendered, " \n\r\t")
+					}
+				}
+				for _, line := range strings.Split(text, "\n") {
+					m.lines = append(m.lines, line)
 				}
 			} else {
-				m.lines = append(m.lines, "agent: "+strings.TrimRight(msg.output, " \n\r\t")+"\x1b[0m")
+				var assistantBlock []string
+				flushAssistant := func() {
+					if len(assistantBlock) > 0 {
+						text := strings.Join(assistantBlock, "\n")
+						if m.renderer != nil {
+							if rendered, errRender := m.renderer.Render(text); errRender == nil {
+								text = strings.TrimRight(rendered, " \n\r\t")
+							}
+						}
+						m.lines = append(m.lines, "agent: "+text+"\x1b[0m")
+						assistantBlock = nil
+					}
+				}
+
+				for _, line := range strings.Split(outText, "\n") {
+					if strings.HasPrefix(line, "assistant: ") {
+						assistantBlock = append(assistantBlock, strings.TrimPrefix(line, "assistant: "))
+					} else if strings.HasPrefix(line, "tool: ") || strings.HasPrefix(line, "tool rejected:") || strings.HasPrefix(line, "usage:") {
+						flushAssistant()
+						m.lines = append(m.lines, line)
+					} else if strings.TrimSpace(line) == "" {
+						if len(assistantBlock) > 0 {
+							assistantBlock = append(assistantBlock, "")
+						} else {
+							m.lines = append(m.lines, "")
+						}
+					} else {
+						if len(assistantBlock) > 0 {
+							assistantBlock = append(assistantBlock, line)
+						} else {
+							m.lines = append(m.lines, line)
+						}
+					}
+				}
+				flushAssistant()
 			}
 		}
 		return m, nil

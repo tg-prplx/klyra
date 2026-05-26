@@ -150,6 +150,20 @@ func WriteDefault(path string) (string, error) {
 	return path, nil
 }
 
+func (c Config) Save(path string) error {
+	if strings.TrimSpace(path) == "" {
+		path = DefaultPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
 func (c Config) WithProfile(name string) (Config, error) {
 	c.applyDefaults()
 	name = strings.TrimSpace(name)
