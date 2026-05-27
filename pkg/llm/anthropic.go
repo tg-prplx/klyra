@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 const anthropicVersion = "2023-06-01"
@@ -29,7 +28,7 @@ func NewAnthropicProvider(apiKey, baseURL string) (*AnthropicProvider, error) {
 	return &AnthropicProvider{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 90 * time.Second},
+		client:  &http.Client{Timeout: 0},
 	}, nil
 }
 

@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"time"
 )
 
 type GeminiProvider struct {
@@ -28,7 +27,7 @@ func NewGeminiProvider(apiKey, baseURL string) (*GeminiProvider, error) {
 	return &GeminiProvider{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 90 * time.Second},
+		client:  &http.Client{Timeout: 0},
 	}, nil
 }
 

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 )
 
 type ResponsesProvider struct {
@@ -29,7 +28,7 @@ func NewResponsesProvider(apiKey, baseURL string) (*ResponsesProvider, error) {
 	return &ResponsesProvider{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 90 * time.Second},
+		client:  &http.Client{Timeout: 0},
 	}, nil
 }
 
