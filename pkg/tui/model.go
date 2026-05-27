@@ -345,7 +345,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderer, _ = glamour.NewTermRenderer(
 			glamour.WithStandardStyle("dark"),
 			glamour.WithPreservedNewLines(),
-			glamour.WithWordWrap(max(40, m.width-8)),
+			glamour.WithWordWrap(max(40, m.chatWidth()-8)),
 		)
 		m.syncViewport(true)
 		return m, nil
@@ -452,10 +452,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sidebarVisible = true
 			m.sidebarScroll = 0
 			m.sidebarCursor = -1
+			m.rebuildRenderer()
 			m.syncViewport(false)
 			return m, nil
 		case "alt+f7":
 			m.sidebarVisible = !m.sidebarVisible
+			m.rebuildRenderer()
 			m.syncViewport(false)
 			return m, nil
 		case "f8":
@@ -967,6 +969,14 @@ func (m *Model) syncViewport(scrollToBottom bool) {
 
 func (m Model) shouldRenderSidebar() bool {
 	return m.sidebarVisible && m.width >= 100
+}
+
+func (m *Model) rebuildRenderer() {
+	m.renderer, _ = glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithPreservedNewLines(),
+		glamour.WithWordWrap(max(40, m.chatWidth()-8)),
+	)
 }
 
 func (m Model) sidebarWidth() int {
@@ -2502,12 +2512,12 @@ func (m Model) renderThoughts(text string, expanded, live bool) []string {
 		icon = "▾"
 	}
 	headerStyle := lipgloss.NewStyle().Foreground(colorDim).Background(colorInputBg).Padding(0, 1)
-	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Background(colorInputBg).Padding(0, 1).Width(max(24, m.width-8))
+	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Background(colorInputBg).Padding(0, 1).Width(max(24, m.chatWidth()-8))
 	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
 
 	header := headerStyle.Render(fmt.Sprintf("%s %s", icon, label))
 	if !expanded {
-		summary := compactThoughtSummary(text, max(20, m.width-22))
+		summary := compactThoughtSummary(text, max(20, m.chatWidth()-22))
 		return []string{"  " + borderStyle.Render("┌") + header + " " + lipgloss.NewStyle().Foreground(colorMuted).Render(summary)}
 	}
 
@@ -2557,7 +2567,7 @@ func (m Model) renderToolStreamLine(raw string) []string {
 	args := strings.TrimSpace(msg.Arguments)
 	headerStyle := lipgloss.NewStyle().Foreground(colorEmerald).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
-	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.width-12))
+	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.chatWidth()-12))
 	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	icon := "▸"
 	if expanded {
@@ -2598,7 +2608,7 @@ func (m Model) renderToolProgressLine(raw string) []string {
 		headerStyle = lipgloss.NewStyle().Foreground(colorRed).Bold(true)
 	}
 	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
-	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.width-12))
+	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.chatWidth()-12))
 	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	errorStyle := lipgloss.NewStyle().Foreground(colorRed)
 
@@ -2689,7 +2699,7 @@ func (m Model) renderToolLine(raw string) []string {
 
 	headerStyle := lipgloss.NewStyle().Foreground(colorEmerald).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
-	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.width-10))
+	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.chatWidth()-10))
 	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	errorStyle := lipgloss.NewStyle().Foreground(colorRed)
 
