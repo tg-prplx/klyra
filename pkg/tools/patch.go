@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"klyra/pkg/llm"
 )
@@ -14,7 +15,7 @@ type DiffPatcher struct{}
 func (DiffPatcher) Spec() llm.ToolSpec {
 	return llm.ToolSpec{
 		Name:        "diff_patch",
-		Description: "Apply a unified diff in the workspace with git apply.",
+		Description: "Apply a unified diff in the workspace. Uses git apply in git repos and a direct patch fallback elsewhere.",
 		Parameters: objectSchema(map[string]any{
 			"patch": stringProperty("Unified diff patch."),
 		}, "patch"),
@@ -27,11 +28,17 @@ func (DiffPatcher) Run(ctx context.Context, inv Invocation) (Result, error) {
 		return Result{}, err
 	}
 
-	result, err := runGitApply(ctx, inv.CWD, patch, 80, "--whitespace=nowarn", "-")
-	if err != nil {
-		return result, fmt.Errorf("patch failed: %w", err)
+	if isGitRepository(ctx, inv.CWD) {
+		result, err := runGitApply(ctx, inv.CWD, patch, 80, "--whitespace=nowarn", "-")
+		if err != nil {
+			return result, fmt.Errorf("patch failed: %w", err)
+		}
+		return Result{Output: "patch applied"}, nil
 	}
-	return Result{Output: "patch applied"}, nil
+	if err := applyUnifiedPatch(inv.CWD, patch, false); err != nil {
+		return Result{}, fmt.Errorf("patch failed: %w", err)
+	}
+	return Result{Output: "patch applied without git"}, nil
 }
 
 type DiffPreview struct{}
@@ -57,17 +64,28 @@ func (DiffPreview) Run(ctx context.Context, inv Invocation) (Result, error) {
 		return Result{}, err
 	}
 
-	check, err := runGitApply(ctx, inv.CWD, patch, maxLines, "--check", "--whitespace=nowarn", "-")
-	if err != nil {
-		return check, fmt.Errorf("patch check failed: %w", err)
+	if isGitRepository(ctx, inv.CWD) {
+		check, err := runGitApply(ctx, inv.CWD, patch, maxLines, "--check", "--whitespace=nowarn", "-")
+		if err != nil {
+			return check, fmt.Errorf("patch check failed: %w", err)
+		}
+		stat, err := runGitApply(ctx, inv.CWD, patch, maxLines, "--stat", "-")
+		if err != nil {
+			return stat, fmt.Errorf("patch stat failed: %w", err)
+		}
+		output := "patch check passed"
+		if stat.Output != "" {
+			output += "\n" + stat.Output
+		}
+		return Result{Output: output}, nil
 	}
-	stat, err := runGitApply(ctx, inv.CWD, patch, maxLines, "--stat", "-")
+	files, err := previewUnifiedPatch(inv.CWD, patch)
 	if err != nil {
-		return stat, fmt.Errorf("patch stat failed: %w", err)
+		return Result{}, fmt.Errorf("patch check failed: %w", err)
 	}
 	output := "patch check passed"
-	if stat.Output != "" {
-		output += "\n" + stat.Output
+	if len(files) > 0 {
+		output += "\n" + CompressOutput(strings.Join(files, "\n"), maxLines)
 	}
 	return Result{Output: output}, nil
 }

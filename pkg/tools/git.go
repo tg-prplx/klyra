@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"klyra/pkg/llm"
 )
@@ -20,7 +21,11 @@ func (GitStatus) Spec() llm.ToolSpec {
 }
 
 func (GitStatus) Run(ctx context.Context, inv Invocation) (Result, error) {
-	return runGitCommand(ctx, inv.CWD, 120, "status", "--short")
+	result, err := runGitCommand(ctx, inv.CWD, 120, "status", "--short")
+	if err != nil && isNotGitRepository(result.Output) {
+		return Result{Output: "not a git repository"}, nil
+	}
+	return result, err
 }
 
 type GitDiff struct{}
@@ -41,6 +46,9 @@ func (GitDiff) Run(ctx context.Context, inv Invocation) (Result, error) {
 		return Result{}, err
 	}
 	result, err := runGitCommand(ctx, inv.CWD, maxLines, "diff", "--", ".")
+	if err != nil && isNotGitRepository(result.Output) {
+		return Result{Output: "not a git repository; no tracked diff"}, nil
+	}
 	if err != nil {
 		return result, err
 	}
@@ -67,4 +75,15 @@ func runGitCommand(ctx context.Context, cwd string, maxLines int, args ...string
 		return Result{Output: compressed}, fmt.Errorf("git %v failed: %w", args, err)
 	}
 	return Result{Output: compressed}, nil
+}
+
+func isGitRepository(ctx context.Context, cwd string) bool {
+	result, err := runGitCommand(ctx, cwd, 20, "rev-parse", "--is-inside-work-tree")
+	return err == nil && strings.TrimSpace(result.Output) == "true"
+}
+
+func isNotGitRepository(output string) bool {
+	normalized := strings.ToLower(output)
+	return strings.Contains(normalized, "not a git repository") ||
+		strings.Contains(normalized, "not a git repo")
 }

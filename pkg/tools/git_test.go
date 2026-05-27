@@ -22,3 +22,23 @@ func TestGitStatusReturnsCompactStatus(t *testing.T) {
 		t.Fatalf("unexpected status:\n%s", result.Output)
 	}
 }
+
+func TestGitStatusOutsideRepositoryIsNonFatal(t *testing.T) {
+	result, err := GitStatus{}.Run(context.Background(), Invocation{CWD: t.TempDir(), Args: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, "not a git repository") {
+		t.Fatalf("unexpected status:\n%s", result.Output)
+	}
+}
+
+func TestGitDiffOutsideRepositoryIsNonFatal(t *testing.T) {
+	result, err := GitDiff{}.Run(context.Background(), Invocation{CWD: t.TempDir(), Args: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, "no tracked diff") {
+		t.Fatalf("unexpected diff:\n%s", result.Output)
+	}
+}

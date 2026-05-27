@@ -53,6 +53,8 @@ type SettingsModal struct {
 func NewSettingsModal(
 	provider, model, endpoint, reasoning, approval, sandbox, mode string,
 	storeResponses bool,
+	stream bool,
+	baseURLs map[string]string,
 	maxContext, maxOutput, maxSteps, maxMessages, maxInstructions int,
 	contextCockpit, contextCockpitInject bool,
 	contextCockpitTokens, contextCockpitMaxFiles int,
@@ -65,7 +67,13 @@ func NewSettingsModal(
 		{Section: secProvider, Name: "provider", DisplayName: "Provider", Value: provider, Choices: []string{"mock", "openai", "local", "ollama", "anthropic", "gemini"}},
 		{Section: secProvider, Name: "model", DisplayName: "Model", Value: model},
 		{Section: secProvider, Name: "endpoint", DisplayName: "Endpoint", Value: endpoint},
+		{Section: secProvider, Name: "stream", DisplayName: "Streaming", Value: onOff(stream), Choices: []string{"on", "off"}},
 		{Section: secProvider, Name: "reasoning", DisplayName: "Reasoning", Value: reasoning, Choices: []string{"", "minimal", "low", "medium", "high", "xhigh"}},
+		{Section: secProvider, Name: "endpoint_openai", DisplayName: "OpenAI URL", Value: baseURLs["openai"]},
+		{Section: secProvider, Name: "endpoint_local", DisplayName: "Local URL", Value: baseURLs["local"]},
+		{Section: secProvider, Name: "endpoint_ollama", DisplayName: "Ollama URL", Value: baseURLs["ollama"]},
+		{Section: secProvider, Name: "endpoint_anthropic", DisplayName: "Anthropic URL", Value: baseURLs["anthropic"]},
+		{Section: secProvider, Name: "endpoint_gemini", DisplayName: "Gemini URL", Value: baseURLs["gemini"]},
 
 		// API Keys section
 		{Section: secAPIKeys, Name: "openai_key", DisplayName: "OpenAI Key", Value: "", EnvVar: "OPENAI_API_KEY", Masked: true},

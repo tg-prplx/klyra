@@ -53,6 +53,7 @@ type options struct {
 	reasoning              string
 	store                  bool
 	stream                 bool
+	noStream               bool
 	approval               string
 	sandbox                string
 	mode                   string
@@ -104,6 +105,7 @@ func newRootCommand() *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.reasoning, "reasoning", "", "reasoning effort for providers that support it")
 	root.PersistentFlags().BoolVar(&opts.store, "store", false, "allow provider-side response storage when supported")
 	root.PersistentFlags().BoolVar(&opts.stream, "stream", false, "stream model output when the provider supports it")
+	root.PersistentFlags().BoolVar(&opts.noStream, "no-stream", false, "disable model output streaming")
 	root.PersistentFlags().StringVar(&opts.approval, "approval", "", "tool approval mode: auto, ask, always, never")
 	root.PersistentFlags().StringVar(&opts.sandbox, "sandbox", "", "sandbox profile: read-only, workspace-write, danger-full-access")
 	root.PersistentFlags().StringVar(&opts.mode, "mode", "", "agent mode: inspect, edit, repair, refactor")
@@ -146,7 +148,7 @@ func newRootCommand() *cobra.Command {
 				MaxOutput:              runtimeCfg.MaxOutput,
 				Reasoning:              runtimeCfg.Reasoning,
 				Store:                  runtimeCfg.StoreResponses,
-				Stream:                 opts.stream,
+				Stream:                 runtimeCfg.Stream,
 				ApprovalMode:           runtimeCfg.ApprovalMode,
 				Sandbox:                runtimeCfg.Sandbox,
 				Mode:                   runtimeCfg.Mode,
@@ -467,7 +469,7 @@ func newTUICommand(opts *options) *cobra.Command {
 					MaxOutput:              runtimeCfg.MaxOutput,
 					Reasoning:              runtimeCfg.Reasoning,
 					Store:                  runtimeCfg.StoreResponses,
-					Stream:                 true,
+					Stream:                 runtimeCfg.Stream,
 					ApprovalMode:           runtimeCfg.ApprovalMode,
 					Sandbox:                runtimeCfg.Sandbox,
 					Mode:                   runtimeCfg.Mode,
@@ -588,7 +590,9 @@ func newTUICommand(opts *options) *cobra.Command {
 				Provider:               runtimeCfg.Provider,
 				Model:                  runtimeCfg.Model,
 				BaseURL:                providerBaseURL(runtimeCfg, runtimeCfg.Provider),
+				BaseURLs:               runtimeCfg.BaseURLs,
 				Reasoning:              runtimeCfg.Reasoning,
+				Stream:                 runtimeCfg.Stream,
 				Sandbox:                runtimeCfg.Sandbox,
 				Approval:               runtimeCfg.ApprovalMode,
 				Mode:                   runtimeCfg.Mode,
@@ -783,7 +787,13 @@ func formatTUISettings(cfg appconfig.Config, attachments []llm.Attachment) strin
 	fmt.Fprintf(&builder, "- provider: `%s`\n", valueOrString(cfg.Provider, "mock"))
 	fmt.Fprintf(&builder, "- model: `%s`\n", valueOrString(cfg.Model, "provider env / routed"))
 	fmt.Fprintf(&builder, "- endpoint: `%s`\n", valueOrString(providerBaseURL(cfg, cfg.Provider), "provider default/env"))
+	for _, provider := range []string{"openai", "local", "ollama", "anthropic", "gemini"} {
+		if endpoint := providerBaseURL(cfg, provider); endpoint != "" {
+			fmt.Fprintf(&builder, "- %s endpoint: `%s`\n", provider, endpoint)
+		}
+	}
 	fmt.Fprintf(&builder, "- reasoning: `%s`\n", valueOrString(cfg.Reasoning, "default"))
+	fmt.Fprintf(&builder, "- stream: `%s`\n", onOff(cfg.Stream))
 	fmt.Fprintf(&builder, "- sandbox: `%s`\n", valueOrString(cfg.Sandbox, "workspace-write"))
 	fmt.Fprintf(&builder, "- mode: `%s`\n", valueOrString(cfg.Mode, "edit"))
 	fmt.Fprintf(&builder, "- provider store: `%s`\n", onOff(cfg.StoreResponses))
@@ -801,6 +811,9 @@ func formatTUISettings(cfg appconfig.Config, attachments []llm.Attachment) strin
 	fmt.Fprintf(&builder, "- context recipes: `%s`\n", onOff(cfg.ContextRecipes))
 	fmt.Fprintf(&builder, "- negative context: `%s`\n", onOff(cfg.NegativeContext))
 	fmt.Fprintf(&builder, "- skills: `%s`\n", onOff(cfg.Skills))
+	fmt.Fprintf(&builder, "- fast model: `%s`\n", valueOrString(cfg.ModelRoutes["fast"], "default"))
+	fmt.Fprintf(&builder, "- edit model: `%s`\n", valueOrString(cfg.ModelRoutes["edit"], "default"))
+	fmt.Fprintf(&builder, "- deep model: `%s`\n", valueOrString(cfg.ModelRoutes["deep"], "default"))
 	fmt.Fprintf(&builder, "- pending images: `%d`\n", len(attachments))
 	builder.WriteString("\nUse `/provider`, `/model`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/mode`, `/cart add`, `/context`, and `/attach` to change this without leaving Klyra.")
 	return builder.String()
@@ -827,8 +840,24 @@ func applyTUISet(cfg *appconfig.Config, args []string) error {
 			cfg.Model = value
 		case "endpoint", "base_url", "base-url":
 			setProviderBaseURL(cfg, cfg.Provider, value)
+		case "endpoint_openai", "openai_endpoint":
+			setProviderBaseURL(cfg, "openai", value)
+		case "endpoint_local", "local_endpoint":
+			setProviderBaseURL(cfg, "local", value)
+		case "endpoint_ollama", "ollama_endpoint":
+			setProviderBaseURL(cfg, "ollama", value)
+		case "endpoint_anthropic", "anthropic_endpoint":
+			setProviderBaseURL(cfg, "anthropic", value)
+		case "endpoint_gemini", "gemini_endpoint":
+			setProviderBaseURL(cfg, "gemini", value)
 		case "reasoning":
 			cfg.Reasoning = value
+		case "stream":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("stream must be on/off")
+			}
+			cfg.Stream = parsed
 		case "approval":
 			cfg.ApprovalMode = value
 		case "sandbox":
@@ -919,11 +948,29 @@ func applyTUISet(cfg *appconfig.Config, args []string) error {
 				return fmt.Errorf("skills must be on/off")
 			}
 			cfg.Skills = parsed
+		case "fast_model", "fast-model":
+			setModelRoute(cfg, "fast", value)
+		case "edit_model", "edit-model":
+			setModelRoute(cfg, "edit", value)
+		case "deep_model", "deep-model":
+			setModelRoute(cfg, "deep", value)
 		default:
 			return fmt.Errorf("unknown setting %q", key)
 		}
 	}
 	return nil
+}
+
+func setModelRoute(cfg *appconfig.Config, route, model string) {
+	if cfg.ModelRoutes == nil {
+		cfg.ModelRoutes = map[string]string{}
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		delete(cfg.ModelRoutes, route)
+		return
+	}
+	cfg.ModelRoutes[route] = model
 }
 
 func formatContextCart(files []string) string {
@@ -1340,7 +1387,7 @@ func newChatCommand(opts *options) *cobra.Command {
 				MaxOutput:              runtimeCfg.MaxOutput,
 				Reasoning:              runtimeCfg.Reasoning,
 				Store:                  runtimeCfg.StoreResponses,
-				Stream:                 opts.stream,
+				Stream:                 runtimeCfg.Stream,
 				ApprovalMode:           runtimeCfg.ApprovalMode,
 				Sandbox:                runtimeCfg.Sandbox,
 				Mode:                   runtimeCfg.Mode,
@@ -1726,6 +1773,12 @@ func effectiveConfig(cmd *cobra.Command, opts options) (appconfig.Config, error)
 	if flags.Changed("reasoning") {
 		cfg.Reasoning = opts.reasoning
 	}
+	if flags.Changed("stream") {
+		cfg.Stream = opts.stream
+	}
+	if flags.Changed("no-stream") {
+		cfg.Stream = !opts.noStream
+	}
 	if flags.Changed("approval") {
 		cfg.ApprovalMode = opts.approval
 	}
@@ -1912,7 +1965,12 @@ func setProviderBaseURL(cfg *appconfig.Config, provider, baseURL string) {
 	if cfg.BaseURLs == nil {
 		cfg.BaseURLs = map[string]string{}
 	}
-	cfg.BaseURLs[provider] = strings.TrimSpace(baseURL)
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		delete(cfg.BaseURLs, provider)
+		return
+	}
+	cfg.BaseURLs[provider] = baseURL
 }
 
 func loadEnvFile(dir string) {

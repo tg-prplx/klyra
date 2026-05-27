@@ -14,6 +14,7 @@ type Config struct {
 	ModelRoutes            map[string]string  `json:"model_routes,omitempty"`
 	BaseURLs               map[string]string  `json:"base_urls,omitempty"`
 	Reasoning              string             `json:"reasoning,omitempty"`
+	Stream                 bool               `json:"stream"`
 	MaxSteps               int                `json:"max_steps"`
 	MaxMessages            int                `json:"max_messages"`
 	MaxContext             int                `json:"max_context_tokens"`
@@ -41,6 +42,7 @@ type Profile struct {
 	ModelRoutes            map[string]string `json:"model_routes,omitempty"`
 	BaseURLs               map[string]string `json:"base_urls,omitempty"`
 	Reasoning              string            `json:"reasoning,omitempty"`
+	Stream                 *bool             `json:"stream,omitempty"`
 	MaxSteps               int               `json:"max_steps,omitempty"`
 	MaxMessages            int               `json:"max_messages,omitempty"`
 	MaxContext             int               `json:"max_context_tokens,omitempty"`
@@ -66,6 +68,7 @@ func Default() Config {
 		Provider:               "mock",
 		Model:                  "mock-agent",
 		BaseURLs:               map[string]string{},
+		Stream:                 true,
 		MaxSteps:               20,
 		MaxMessages:            40,
 		MaxContext:             24000,
@@ -173,6 +176,9 @@ func Load(path string) (Config, error) {
 	if !strings.Contains(raw, `"skills"`) {
 		cfg.Skills = defaults.Skills
 	}
+	if !strings.Contains(raw, `"stream"`) {
+		cfg.Stream = defaults.Stream
+	}
 	cfg.applyDefaults()
 	return cfg, nil
 }
@@ -240,6 +246,9 @@ func (c Config) WithProfile(name string) (Config, error) {
 	}
 	if profile.Reasoning != "" {
 		c.Reasoning = profile.Reasoning
+	}
+	if profile.Stream != nil {
+		c.Stream = *profile.Stream
 	}
 	if profile.MaxSteps > 0 {
 		c.MaxSteps = profile.MaxSteps

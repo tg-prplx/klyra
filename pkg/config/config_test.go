@@ -47,7 +47,7 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "mock" || cfg.MaxSteps == 0 || cfg.MaxContext == 0 || !cfg.ContextCockpit || !cfg.ContextCockpitInject || !cfg.ContextRecipes || !cfg.NegativeContext || !cfg.Skills {
+	if cfg.Provider != "mock" || cfg.MaxSteps == 0 || cfg.MaxContext == 0 || !cfg.Stream || !cfg.ContextCockpit || !cfg.ContextCockpitInject || !cfg.ContextRecipes || !cfg.NegativeContext || !cfg.Skills {
 		t.Fatalf("expected defaults, got %+v", cfg)
 	}
 }
@@ -61,7 +61,7 @@ func TestLoadOldConfigDefaultsNewContextBooleansOn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.ContextCockpit || !cfg.ContextCockpitInject || !cfg.ContextCockpitDiff || !cfg.ContextRecipes || !cfg.NegativeContext || !cfg.Skills {
+	if !cfg.Stream || !cfg.ContextCockpit || !cfg.ContextCockpitInject || !cfg.ContextCockpitDiff || !cfg.ContextRecipes || !cfg.NegativeContext || !cfg.Skills {
 		t.Fatalf("expected missing new context booleans to default on: %+v", cfg)
 	}
 }
@@ -70,6 +70,7 @@ func TestWithProfileAppliesContextCockpitOverrides(t *testing.T) {
 	cfg := Default()
 	disabled := false
 	cfg.Profiles["small"] = Profile{
+		Stream:                 &disabled,
 		ContextCockpit:         &disabled,
 		ContextCockpitInject:   &disabled,
 		ContextCockpitTokens:   700,
@@ -83,7 +84,7 @@ func TestWithProfileAppliesContextCockpitOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ContextCockpit || got.ContextCockpitInject || got.ContextCockpitDiff || got.ContextRecipes || got.NegativeContext || got.Skills {
+	if got.Stream || got.ContextCockpit || got.ContextCockpitInject || got.ContextCockpitDiff || got.ContextRecipes || got.NegativeContext || got.Skills {
 		t.Fatalf("expected cockpit booleans disabled: %+v", got)
 	}
 	if got.ContextCockpitTokens != 700 || got.ContextCockpitMaxFiles != 25 {

@@ -123,7 +123,9 @@ type Config struct {
 	Provider               string
 	Model                  string
 	BaseURL                string
+	BaseURLs               map[string]string
 	Reasoning              string
+	Stream                 bool
 	Sandbox                string
 	Approval               string
 	Mode                   string
@@ -171,7 +173,9 @@ type Model struct {
 	provider               string
 	model                  string
 	baseURL                string
+	baseURLs               map[string]string
 	reasoning              string
+	stream                 bool
 	sandbox                string
 	approval               string
 	mode                   string
@@ -287,7 +291,9 @@ func New(cfg Config) Model {
 		provider:               cfg.Provider,
 		model:                  cfg.Model,
 		baseURL:                cfg.BaseURL,
+		baseURLs:               cloneStringMap(cfg.BaseURLs),
 		reasoning:              cfg.Reasoning,
+		stream:                 cfg.Stream,
 		sandbox:                cfg.Sandbox,
 		approval:               cfg.Approval,
 		mode:                   cfg.Mode,
@@ -1566,6 +1572,8 @@ func (m *Model) openSettingsModal() {
 		valueOr(m.sandbox, "workspace-write"),
 		valueOr(m.mode, "edit"),
 		m.storeResponses,
+		m.stream,
+		m.baseURLs,
 		m.maxContext, m.maxOutput, m.maxSteps, m.maxMessages, m.maxInstructions,
 		m.contextCockpit, m.contextCockpitInject,
 		m.contextCockpitTokens, m.contextCockpitMaxFiles, m.contextCockpitDiff,
@@ -1758,6 +1766,22 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.provider = sm.GetValue("provider")
 		m.model = sm.GetValue("model")
 		m.baseURL = sm.GetValue("endpoint")
+		m.stream = sm.GetValue("stream") != "off"
+		if m.baseURLs == nil {
+			m.baseURLs = map[string]string{}
+		}
+		for _, provider := range []string{"openai", "local", "ollama", "anthropic", "gemini"} {
+			key := "endpoint_" + provider
+			value := strings.TrimSpace(sm.GetValue(key))
+			if value == "" {
+				delete(m.baseURLs, provider)
+			} else {
+				m.baseURLs[provider] = value
+			}
+		}
+		if endpoint := strings.TrimSpace(m.baseURL); endpoint != "" {
+			m.baseURLs[strings.ToLower(valueOr(m.provider, "openai"))] = endpoint
+		}
 		m.reasoning = sm.GetValue("reasoning")
 		m.approval = sm.GetValue("approval")
 		m.sandbox = sm.GetValue("sandbox")
@@ -1799,6 +1823,10 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			"provider=" + m.provider,
 			"model=" + m.model,
 			"endpoint=" + m.baseURL,
+			"stream=" + onOff(m.stream),
+		}
+		for _, provider := range []string{"openai", "local", "ollama", "anthropic", "gemini"} {
+			parts = append(parts, "endpoint_"+provider+"="+m.baseURLs[provider])
 		}
 		if strings.TrimSpace(m.reasoning) != "" {
 			parts = append(parts, "reasoning="+m.reasoning)
@@ -1821,6 +1849,9 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			"context_recipes="+onOff(m.contextRecipes),
 			"negative_context="+onOff(m.negativeContext),
 			"skills="+onOff(m.skills),
+			"fast_model="+m.fastModel,
+			"edit_model="+m.editModel,
+			"deep_model="+m.deepModel,
 		)
 		cmdText := strings.Join(parts, " ")
 
@@ -2103,6 +2134,22 @@ func (m *Model) applyOptimisticCommand(value string) {
 				m.model = value
 			case "endpoint":
 				m.baseURL = value
+				if m.baseURLs == nil {
+					m.baseURLs = map[string]string{}
+				}
+				m.baseURLs[strings.ToLower(valueOr(m.provider, "openai"))] = value
+			case "endpoint_openai", "openai_endpoint":
+				m.setProviderEndpoint("openai", value)
+			case "endpoint_local", "local_endpoint":
+				m.setProviderEndpoint("local", value)
+			case "endpoint_ollama", "ollama_endpoint":
+				m.setProviderEndpoint("ollama", value)
+			case "endpoint_anthropic", "anthropic_endpoint":
+				m.setProviderEndpoint("anthropic", value)
+			case "endpoint_gemini", "gemini_endpoint":
+				m.setProviderEndpoint("gemini", value)
+			case "stream":
+				m.stream = value != "off"
 			case "reasoning":
 				m.reasoning = value
 			case "approval":
@@ -2153,6 +2200,12 @@ func (m *Model) applyOptimisticCommand(value string) {
 				m.negativeContext = value != "off"
 			case "skills":
 				m.skills = value != "off"
+			case "fast_model":
+				m.fastModel = value
+			case "edit_model":
+				m.editModel = value
+			case "deep_model":
+				m.deepModel = value
 			}
 		}
 	case "/provider":
@@ -2162,6 +2215,7 @@ func (m *Model) applyOptimisticCommand(value string) {
 		m.model = strings.Join(args[1:], " ")
 	case "/endpoint":
 		m.baseURL = strings.Join(args[1:], " ")
+		m.setProviderEndpoint(m.provider, m.baseURL)
 	case "/reasoning":
 		m.reasoning = args[1]
 	case "/approval":
@@ -2305,11 +2359,30 @@ func formatNumber(value int) string {
 }
 
 func parsePositiveInt(value string) int {
-	parsed, err := strconv.Atoi(value)
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || parsed <= 0 {
 		return 0
 	}
 	return parsed
+}
+
+func (m *Model) setProviderEndpoint(provider, endpoint string) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = "openai"
+	}
+	if m.baseURLs == nil {
+		m.baseURLs = map[string]string{}
+	}
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		delete(m.baseURLs, provider)
+	} else {
+		m.baseURLs[provider] = endpoint
+	}
+	if strings.EqualFold(valueOr(m.provider, "openai"), provider) {
+		m.baseURL = endpoint
+	}
 }
 
 func shorten(value string, maxLen int) string {
@@ -2963,6 +3036,17 @@ func valueOr(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[strings.ToLower(strings.TrimSpace(key))] = value
+	}
+	return cloned
 }
 
 func max(left, right int) int {
