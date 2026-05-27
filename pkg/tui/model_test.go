@@ -1,11 +1,44 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+func executeCmd(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	msg := cmd()
+	if msg == nil {
+		return nil
+	}
+	val := reflect.ValueOf(msg)
+	if val.Kind() == reflect.Slice && strings.ToLower(val.Type().Name()) == "batchmsg" {
+		var finalMsg tea.Msg
+		for i := 0; i < val.Len(); i++ {
+			subCmdVal := val.Index(i)
+			subCmd, ok := subCmdVal.Interface().(tea.Cmd)
+			if !ok {
+				continue
+			}
+			if subCmd != nil {
+				subMsg := subCmd()
+				if subMsg != nil {
+					if _, ok := subMsg.(responseMsg); ok {
+						return subMsg
+					}
+					finalMsg = subMsg
+				}
+			}
+		}
+		return finalMsg
+	}
+	return msg
+}
 
 func TestViewIncludesMetadata(t *testing.T) {
 	model := New(Config{SessionID: "s1", Provider: "mock", Model: "mock-agent"})
@@ -57,7 +90,7 @@ func TestHandlerCommandReturnsResponse(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected command")
 	}
-	msg := cmd()
+	msg := executeCmd(cmd)
 	updated, _ = updated.(Model).Update(msg)
 	view := updated.(Model).View()
 	if !strings.Contains(view, "handled") || !strings.Contains(view, "/status") {
@@ -79,7 +112,7 @@ func TestFirstEnterSendsMessageInsteadOfAutocomplete(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected handler command")
 	}
-	_ = cmd()
+	_ = executeCmd(cmd)
 	if seen != "hello" {
 		t.Fatalf("expected natural message to be sent, got %q", seen)
 	}
@@ -128,7 +161,7 @@ func TestSettingsModalAppliesFormWithoutSlashTyping(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected settings apply command")
 	}
-	_ = cmd()
+	_ = executeCmd(cmd)
 	m = updated.(Model)
 	if !strings.Contains(seen, "/set provider=openai") {
 		t.Fatalf("settings form did not submit provider update: %q", seen)
@@ -244,7 +277,7 @@ func TestCommandWithArgsBypassesPicker(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected command for /approval with argument")
 	}
-	_ = cmd()
+	_ = executeCmd(cmd)
 	m := updated.(Model)
 	if m.activeModal != modalNone {
 		t.Fatal("picker should not open when arg is provided")
@@ -254,5 +287,56 @@ func TestCommandWithArgsBypassesPicker(t *testing.T) {
 	}
 	if seen != "/approval ask" {
 		t.Fatalf("handler should receive full command, got %q", seen)
+	}
+}
+
+func TestModelReasoningThoughts(t *testing.T) {
+	model := New(Config{
+		Handler: func(input string) (string, error) {
+			return "done", nil
+		},
+	})
+
+	// 1. Send ReasoningMsg and check compact rendering
+	updated, _ := model.Update(ReasoningMsg("thinking about coding"))
+	m := updated.(Model)
+	if m.reasoningText != "thinking about coding" {
+		t.Fatalf("expected reasoning text 'thinking about coding', got %q", m.reasoningText)
+	}
+	if m.reasonExpanded {
+		t.Fatal("expected reasoning to be collapsed by default")
+	}
+	view := m.View()
+	if !strings.Contains(view, "Show Thoughts: 💭 thinking about coding") {
+		t.Fatalf("compact thoughts not rendered in view:\n%s", view)
+	}
+
+	// 2. Toggle F4 (expand)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyF4})
+	m = updated.(Model)
+	if !m.reasonExpanded {
+		t.Fatal("expected reasoning to be expanded after F4 keypress")
+	}
+	view = m.View()
+	if !strings.Contains(view, "Hide Thoughts") || !strings.Contains(view, "│ thinking about coding") {
+		t.Fatalf("expanded thoughts not rendered in view:\n%s", view)
+	}
+
+	// 3. Toggle F4 again (collapse)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyF4})
+	m = updated.(Model)
+	if m.reasonExpanded {
+		t.Fatal("expected reasoning to be collapsed after second F4 keypress")
+	}
+
+	// 4. Submit input (Enter) should clear reasoning
+	m.input.SetValue("hello")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.reasoningText != "" {
+		t.Fatalf("expected reasoning text to be cleared on Enter, got %q", m.reasoningText)
+	}
+	if m.reasonExpanded {
+		t.Fatal("expected reasoning expanded state to be reset on Enter")
 	}
 }

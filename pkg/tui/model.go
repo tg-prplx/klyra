@@ -76,6 +76,8 @@ type Handler func(string) (string, error)
 
 type StreamMsg string
 
+type ReasoningMsg string
+
 type ApprovalRequestMsg struct {
 	Tool   string
 	Risk   string
@@ -160,6 +162,8 @@ type Model struct {
 	history         []string
 	historyIdx      int
 	tempInput       string
+	reasoningText   string
+	reasonExpanded  bool
 
 	// Modal state
 	activeModal   modalKind
@@ -200,7 +204,7 @@ func New(cfg Config) Model {
 		glamour.WithWordWrap(80),
 	)
 
-	return Model{
+	m := Model{
 		title:           title,
 		sessionID:       cfg.SessionID,
 		provider:        cfg.Provider,
@@ -226,10 +230,16 @@ func New(cfg Config) Model {
 		selectedCmdIdx:  0,
 		renderer:        renderer,
 		lines:           []string{},
-		viewport:        viewport.New(0, 0),
+		viewport:        viewport.New(80, 20),
 		history:         []string{},
 		historyIdx:      0,
+		reasoningText:   "",
+		reasonExpanded:  false,
 	}
+	m.width = 80
+	m.height = 24
+	m.syncViewport(true)
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -287,6 +297,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f3":
 			m.debugExpanded = !m.debugExpanded
 			m.syncViewport(m.debugExpanded)
+			return m, nil
+		case "f4":
+			m.reasonExpanded = !m.reasonExpanded
+			m.syncViewport(m.reasonExpanded)
 			return m, nil
 		case "pgup":
 			m.viewport.PageUp()
@@ -369,6 +383,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.busy = true
 			m.streamBuf = ""
+			m.reasoningText = ""
+			m.reasonExpanded = false
 			m.spinnerFrame = 0
 			if len(m.lines) > 0 {
 				m.lines = append(m.lines, "")
@@ -379,6 +395,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case StreamMsg:
 		m.streamBuf += string(msg)
+		m.syncViewport(true)
+		return m, nil
+	case ReasoningMsg:
+		m.reasoningText += string(msg)
 		m.syncViewport(true)
 		return m, nil
 	case ApprovalRequestMsg:
@@ -600,6 +620,47 @@ func (m Model) buildFormattedLines() []string {
 	} else if m.busy {
 		formattedLines = append(formattedLines, "")
 		formattedLines = append(formattedLines, m.renderThinkingBar())
+	}
+
+	// Model thoughts
+	if m.reasoningText != "" {
+		formattedLines = append(formattedLines, "")
+		if m.reasonExpanded {
+			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorBrandDim).Render("  [F4] Hide Thoughts"))
+			
+			styleThoughts := lipgloss.NewStyle().Foreground(colorDim)
+			styleBorder := lipgloss.NewStyle().Foreground(colorBrandDim)
+			
+			for _, line := range strings.Split(m.reasoningText, "\n") {
+				formattedLines = append(formattedLines, "  "+styleBorder.Render("│")+" "+styleThoughts.Render(line))
+			}
+		} else {
+			lines := strings.Split(m.reasoningText, "\n")
+			lastLine := ""
+			for i := len(lines) - 1; i >= 0; i-- {
+				if trimmed := strings.TrimSpace(lines[i]); trimmed != "" {
+					lastLine = trimmed
+					break
+				}
+			}
+			if lastLine == "" {
+				lastLine = "thinking..."
+			}
+			
+			maxLen := 80
+			if m.width > 40 && m.width-30 < maxLen {
+				maxLen = m.width - 30
+			}
+			if len(lastLine) > maxLen {
+				lastLine = lastLine[len(lastLine)-maxLen:]
+				if idx := strings.Index(lastLine, " "); idx != -1 {
+					lastLine = "..." + lastLine[idx:]
+				} else {
+					lastLine = "..." + lastLine
+				}
+			}
+			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorBrandDim).Render(fmt.Sprintf("  [F4] Show Thoughts: 💭 %s", lastLine)))
+		}
 	}
 
 	if m.contextDebug != "" {
@@ -876,6 +937,7 @@ func (m Model) updatePickerModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Send to handler
 		cmdText := "/" + field + " " + value
 		m.lines = append(m.lines, "system: "+field+" → "+valueOr(value, "default"))
+		m.syncViewport(true)
 		return m, runHandler(m.handler, cmdText)
 	}
 	return m, nil
@@ -1019,6 +1081,7 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		m.closeModal()
 		m.lines = append(m.lines, "system: settings saved")
+		m.syncViewport(true)
 		return m, runHandler(m.handler, cmdText)
 	}
 	if len(msg.Runes) > 0 {
@@ -1189,11 +1252,14 @@ func (m *Model) handleLocalCommand(value string) (bool, tea.Cmd) {
 		m.applyOptimisticCommand(value)
 		m.busy = true
 		m.streamBuf = ""
+		m.reasoningText = ""
+		m.reasonExpanded = false
 		m.spinnerFrame = 0
 		if len(m.lines) > 0 {
 			m.lines = append(m.lines, "")
 		}
 		m.lines = append(m.lines, "you: "+value)
+		m.syncViewport(true)
 		return true, tea.Batch(runHandler(m.handler, value), tickSpinner())
 	}
 

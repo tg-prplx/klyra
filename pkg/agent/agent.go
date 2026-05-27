@@ -231,6 +231,10 @@ func (a *Agent) complete(ctx context.Context, req llm.Request) (llm.Response, bo
 
 	streamStarted := false
 	resp, err := streamer.Stream(ctx, req, func(event llm.StreamEvent) error {
+		if event.Reasoning != "" {
+			fmt.Fprintf(a.cfg.Output, "reasoning: %s", event.Reasoning)
+			return nil
+		}
 		if event.Delta == "" {
 			return nil
 		}

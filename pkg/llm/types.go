@@ -69,7 +69,8 @@ type Provider interface {
 }
 
 type StreamEvent struct {
-	Delta string
+	Delta     string
+	Reasoning string
 }
 
 type StreamHandler func(StreamEvent) error

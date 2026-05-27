@@ -176,7 +176,13 @@ type programWriter struct {
 
 func (pw *programWriter) Write(b []byte) (n int, err error) {
 	if pw.p != nil && *pw.p != nil {
-		(*pw.p).Send(tui.StreamMsg(string(b)))
+		str := string(b)
+		// Check if it is a reasoning trace or normal assistant output
+		if strings.HasPrefix(str, "reasoning: ") {
+			(*pw.p).Send(tui.ReasoningMsg(strings.TrimPrefix(str, "reasoning: ")))
+		} else {
+			(*pw.p).Send(tui.StreamMsg(str))
+		}
 	}
 	return len(b), nil
 }

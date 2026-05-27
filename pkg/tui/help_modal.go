@@ -119,6 +119,8 @@ func (h HelpModal) View(termWidth, termHeight int) string {
 	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("Ctrl+C"), cmdDescStyle.Render("Exit")))
 	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("↑ / ↓ "), cmdDescStyle.Render("Navigate autocomplete / modals")))
 	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("Tab   "), cmdDescStyle.Render("Next field in settings")))
+	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("F3    "), cmdDescStyle.Render("Toggle Context Debugger")))
+	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("F4    "), cmdDescStyle.Render("Toggle Model Reasoning (Thoughts)")))
 
 	for i, cat := range h.Categories {
 		if i == 0 {
