@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestOpenAIProviderParsesToolCalls(t *testing.T) {
@@ -155,6 +156,37 @@ func TestOpenAIProviderRetriesTransientLocalStreamBeforeOutput(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("expected one stream retry, got %d calls", calls)
+	}
+}
+
+func TestOpenAIProviderStopsOnLocalStreamIdleTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAIProvider("", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.transport.streamIdleTimeout = 20 * time.Millisecond
+	start := time.Now()
+	_, err = provider.Stream(context.Background(), Request{
+		Model:    "local-model",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected stream idle timeout")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("stream idle timeout took too long: %s", elapsed)
+	}
+	if !strings.Contains(err.Error(), "stream idle timeout") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

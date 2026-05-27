@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 )
 
 type OpenAIProvider struct {
@@ -141,7 +142,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req Request, handler Stream
 		}
 
 		emitted := false
-		resp, readErr := readOpenAIChatStream(httpResp.Body, func(event StreamEvent) error {
+		resp, readErr := readOpenAIChatStream(ctx, httpResp.Body, p.transport.streamIdleTimeout, func(event StreamEvent) error {
 			if event.Delta != "" || event.Reasoning != "" || event.ToolName != "" || event.ToolArgumentsDelta != "" {
 				emitted = true
 			}
@@ -376,17 +377,29 @@ func parseOpenAIToolCalls(calls []openAIToolCall) []ToolCall {
 	return out
 }
 
-func readOpenAIChatStream(reader io.Reader, handler StreamHandler) (Response, error) {
+func readOpenAIChatStream(ctx context.Context, reader io.ReadCloser, idleTimeout time.Duration, handler StreamHandler) (Response, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lines := make(chan openAIStreamScanLine, 1)
+	go scanOpenAIStreamLines(ctx, scanner, lines)
 
 	var content strings.Builder
 	var usage Usage
 	inThinkBlock := false
 	pendingContent := ""
 	toolCalls := map[int]*openAIStreamToolCall{}
-	for scanner.Scan() {
-		line := scanner.Text()
+	var scanErr error
+	for {
+		item, err := nextOpenAIStreamLine(ctx, reader, lines, idleTimeout)
+		if err != nil {
+			scanErr = err
+			break
+		}
+		if item.Done {
+			scanErr = item.Err
+			break
+		}
+		line := item.Line
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -446,7 +459,7 @@ func readOpenAIChatStream(reader io.Reader, handler StreamHandler) (Response, er
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
+	if scanErr != nil {
 		if content.Len() > 0 || len(toolCalls) > 0 {
 			errContent := content.String()
 			errCalls := finishOpenAIStreamToolCalls(toolCalls)
@@ -459,7 +472,7 @@ func readOpenAIChatStream(reader io.Reader, handler StreamHandler) (Response, er
 				Usage:     usage,
 			}, nil
 		}
-		return Response{}, err
+		return Response{}, scanErr
 	}
 	finalContent := content.String()
 	if usage.TotalTokens == 0 && usage.InputTokens == 0 && usage.OutputTokens == 0 {
@@ -470,6 +483,43 @@ func readOpenAIChatStream(reader io.Reader, handler StreamHandler) (Response, er
 		ToolCalls: finishOpenAIStreamToolCalls(toolCalls),
 		Usage:     usage,
 	}, nil
+}
+
+type openAIStreamScanLine struct {
+	Line string
+	Err  error
+	Done bool
+}
+
+func scanOpenAIStreamLines(ctx context.Context, scanner *bufio.Scanner, lines chan<- openAIStreamScanLine) {
+	for scanner.Scan() {
+		select {
+		case lines <- openAIStreamScanLine{Line: scanner.Text()}:
+		case <-ctx.Done():
+			return
+		}
+	}
+	select {
+	case lines <- openAIStreamScanLine{Err: scanner.Err(), Done: true}:
+	case <-ctx.Done():
+	}
+}
+
+func nextOpenAIStreamLine(ctx context.Context, reader io.Closer, lines <-chan openAIStreamScanLine, idleTimeout time.Duration) (openAIStreamScanLine, error) {
+	var timer <-chan time.Time
+	if idleTimeout > 0 {
+		timer = time.After(idleTimeout)
+	}
+	select {
+	case <-ctx.Done():
+		_ = reader.Close()
+		return openAIStreamScanLine{}, ctx.Err()
+	case item := <-lines:
+		return item, nil
+	case <-timer:
+		_ = reader.Close()
+		return openAIStreamScanLine{}, fmt.Errorf("openai-compatible stream idle timeout after %s without server events; check the local model server timeout/logs", idleTimeout)
+	}
 }
 
 func routeOpenAIContentDelta(text string, inThinkBlock *bool, pending *string, content *strings.Builder, handler StreamHandler) error {

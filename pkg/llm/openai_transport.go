@@ -9,15 +9,18 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type openAIChatTransport struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
-	retry   openAIRetryPolicy
+	apiKey            string
+	baseURL           string
+	client            *http.Client
+	retry             openAIRetryPolicy
+	streamIdleTimeout time.Duration
 }
 
 type openAIRetryPolicy struct {
@@ -31,9 +34,10 @@ func newOpenAIChatTransport(apiKey, baseURL string, retryTransient bool) openAIC
 		attempts = 3
 	}
 	return openAIChatTransport{
-		apiKey:  strings.TrimSpace(apiKey),
-		baseURL: strings.TrimRight(baseURL, "/"),
-		client:  &http.Client{Timeout: 0},
+		apiKey:            strings.TrimSpace(apiKey),
+		baseURL:           strings.TrimRight(baseURL, "/"),
+		client:            &http.Client{Timeout: 0},
+		streamIdleTimeout: openAIStreamIdleTimeout(retryTransient),
 		retry: openAIRetryPolicy{
 			MaxAttempts: attempts,
 			Backoff: func(attempt int) time.Duration {
@@ -41,6 +45,25 @@ func newOpenAIChatTransport(apiKey, baseURL string, retryTransient bool) openAIC
 			},
 		},
 	}
+}
+
+func openAIStreamIdleTimeout(localCompatible bool) time.Duration {
+	raw := strings.TrimSpace(os.Getenv("KLYRA_OPENAI_STREAM_IDLE_TIMEOUT"))
+	if raw != "" {
+		if raw == "0" {
+			return 0
+		}
+		if parsed, err := time.ParseDuration(raw); err == nil {
+			return parsed
+		}
+		if seconds, err := strconv.Atoi(raw); err == nil {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	if localCompatible {
+		return 2 * time.Minute
+	}
+	return 0
 }
 
 func (t openAIChatTransport) doChat(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
