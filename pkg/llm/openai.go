@@ -385,11 +385,17 @@ func readOpenAIChatStream(reader io.Reader, handler StreamHandler) (Response, er
 			continue
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-		if data == "" || data == "[DONE]" {
+		if data == "" {
 			continue
+		}
+		if data == "[DONE]" {
+			break
 		}
 		var chunk openAIChatStreamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			if content.Len() > 0 || len(toolCalls) > 0 {
+				continue
+			}
 			return Response{}, err
 		}
 		if chunk.Error != nil {
@@ -422,9 +428,6 @@ func readOpenAIChatStream(reader io.Reader, handler StreamHandler) (Response, er
 			accumulateOpenAIStreamToolCalls(toolCalls, delta.ToolCalls)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return Response{}, err
-	}
 	if pendingContent != "" {
 		if inThinkBlock {
 			if err := emitOpenAIReasoningDelta(pendingContent, handler); err != nil {
@@ -436,6 +439,16 @@ func readOpenAIChatStream(reader io.Reader, handler StreamHandler) (Response, er
 				return Response{}, err
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		if content.Len() > 0 || len(toolCalls) > 0 {
+			return Response{
+				Content:   content.String(),
+				ToolCalls: finishOpenAIStreamToolCalls(toolCalls),
+				Usage:     usage,
+			}, nil
+		}
+		return Response{}, err
 	}
 	return Response{
 		Content:   content.String(),

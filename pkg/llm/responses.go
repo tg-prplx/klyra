@@ -225,13 +225,20 @@ func readResponsesStream(reader io.Reader, handler StreamHandler) (Response, err
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
+			isDone := len(dataLines) == 1 && strings.TrimSpace(dataLines[0]) == "[DONE]"
 			resp, err := processResponsesStreamData(dataLines, handler)
 			dataLines = nil
 			if err != nil {
+				if hasResponsePayload(final) {
+					return final, nil
+				}
 				return final, err
 			}
 			if hasResponsePayload(resp) {
 				final = resp
+			}
+			if isDone {
+				break
 			}
 			continue
 		}
@@ -240,11 +247,17 @@ func readResponsesStream(reader io.Reader, handler StreamHandler) (Response, err
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		if hasResponsePayload(final) {
+			return final, nil
+		}
 		return final, err
 	}
 	if len(dataLines) > 0 {
 		resp, err := processResponsesStreamData(dataLines, handler)
 		if err != nil {
+			if hasResponsePayload(final) {
+				return final, nil
+			}
 			return final, err
 		}
 		if hasResponsePayload(resp) {
