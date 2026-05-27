@@ -471,12 +471,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "pgdn":
 			m.viewport.PageDown()
 			return m, nil
-		case "right", "l":
+		case "right":
 			if m.toggleLatestThoughtsExpand(true) {
 				m.syncViewport(true)
 				return m, tea.ClearScreen
 			}
-		case "left", "h":
+		case "left":
 			if m.toggleLatestThoughtsExpand(false) {
 				m.syncViewport(true)
 				return m, tea.ClearScreen
