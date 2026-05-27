@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +43,9 @@ var (
 	colorInputBg   = lipgloss.Color("#111827") // very dark bg
 )
 
+var mouseEscapePattern = regexp.MustCompile(`(?:\x1b\[|\[)?<\d+;\d+;\d+[mM]`)
+var mouseEscapeFragmentPattern = regexp.MustCompile(`\[{3,}`)
+
 // ---------------------------------------------------------------------------
 // Spinner
 // ---------------------------------------------------------------------------
@@ -53,9 +59,6 @@ var gradientPalette = []lipgloss.Color{
 	"#0EA5E9", // sky
 	"#06B6D4", // cyan
 }
-
-// Pulse sizes: bar width oscillates for a breathing effect.
-var pulseSizes = []int{3, 4, 5, 7, 9, 11, 12, 12, 11, 9, 7, 5, 4, 3}
 
 // Block density chars for soft-edge rendering.
 var densityChars = []rune{'░', '▒', '▓', '█'}
@@ -78,14 +81,17 @@ type Handler func(string) (string, error)
 
 type PickerProvider func(field string) (PickerModal, error)
 
+type InterruptFunc func() bool
+
 type StreamMsg string
 
 type ReasoningMsg string
 
 type ToolStreamMsg struct {
-	ID             string
-	Name           string
-	ArgumentsDelta string
+	Index     int
+	ID        string
+	Name      string
+	Arguments string
 }
 
 type ToolProgressMsg struct {
@@ -111,29 +117,41 @@ type CommandDef struct {
 }
 
 type Config struct {
-	CWD             string
-	Title           string
-	SessionID       string
-	Provider        string
-	Model           string
-	BaseURL         string
-	Reasoning       string
-	Sandbox         string
-	Approval        string
-	Mode            string
-	CartCount       int
-	MaxContext      int
-	MaxOutput       int
-	MaxSteps        int
-	MaxMessages     int
-	MaxInstructions int
-	FastModel       string
-	EditModel       string
-	DeepModel       string
-	Handler         Handler
-	PickerProvider  PickerProvider
-	Commands        []CommandDef
-	InitialLines    []string
+	CWD                    string
+	Title                  string
+	SessionID              string
+	Provider               string
+	Model                  string
+	BaseURL                string
+	Reasoning              string
+	Sandbox                string
+	Approval               string
+	Mode                   string
+	StoreResponses         bool
+	CartCount              int
+	MaxContext             int
+	MaxOutput              int
+	MaxSteps               int
+	MaxMessages            int
+	MaxInstructions        int
+	ContextCockpit         bool
+	ContextCockpitInject   bool
+	ContextCockpitTokens   int
+	ContextCockpitMaxFiles int
+	ContextCockpitDiff     bool
+	ContextRecipes         bool
+	NegativeContext        bool
+	FastModel              string
+	EditModel              string
+	DeepModel              string
+	Handler                Handler
+	Interrupt              InterruptFunc
+	PickerProvider         PickerProvider
+	Commands               []CommandDef
+	InitialLines           []string
+	SidebarFiles           []string
+	SidebarDiff            string
+	SidebarPosition        int // 0=left, 1=right
 }
 
 type modalKind int
@@ -146,49 +164,67 @@ const (
 )
 
 type Model struct {
-	cwd             string
-	title           string
-	sessionID       string
-	provider        string
-	model           string
-	baseURL         string
-	reasoning       string
-	sandbox         string
-	approval        string
-	mode            string
-	cartCount       int
-	maxContext      int
-	maxOutput       int
-	maxSteps        int
-	maxMessages     int
-	maxInstructions int
-	fastModel       string
-	editModel       string
-	deepModel       string
-	handler         Handler
-	pickerProvider  PickerProvider
-	input           textinput.Model
-	lines           []string
-	width           int
-	height          int
-	busy            bool
-	err             error
-	commands        []CommandDef
-	filteredCmds    []CommandDef
-	selectedCmdIdx  int
-	streamBuf       string
-	renderer        *glamour.TermRenderer
-	approvalReq     *ApprovalRequestMsg
-	spinnerFrame    int
-	viewport        viewport.Model
-	contextDebug    string
-	debugExpanded   bool
-	history         []string
-	historyIdx      int
-	tempInput       string
-	reasoningText   string
-	reasonExpanded  bool
-	copyMode        bool
+	cwd                    string
+	title                  string
+	sessionID              string
+	provider               string
+	model                  string
+	baseURL                string
+	reasoning              string
+	sandbox                string
+	approval               string
+	mode                   string
+	storeResponses         bool
+	cartCount              int
+	maxContext             int
+	maxOutput              int
+	maxSteps               int
+	maxMessages            int
+	maxInstructions        int
+	contextCockpit         bool
+	contextCockpitInject   bool
+	contextCockpitTokens   int
+	contextCockpitMaxFiles int
+	contextCockpitDiff     bool
+	contextRecipes         bool
+	negativeContext        bool
+	fastModel              string
+	editModel              string
+	deepModel              string
+	handler                Handler
+	interrupt              InterruptFunc
+	pickerProvider         PickerProvider
+	input                  textinput.Model
+	lines                  []string
+	width                  int
+	height                 int
+	busy                   bool
+	err                    error
+	commands               []CommandDef
+	filteredCmds           []CommandDef
+	selectedCmdIdx         int
+	streamBuf              string
+	renderer               *glamour.TermRenderer
+	approvalReq            *ApprovalRequestMsg
+	spinnerFrame           int
+	viewport               viewport.Model
+	contextDebug           string
+	debugExpanded          bool
+	history                []string
+	historyIdx             int
+	tempInput              string
+	reasoningText          string
+	reasonExpanded         bool
+	copyMode               bool
+	interrupted            bool
+	mouseFragmentTTL       int
+	sidebarVisible         bool
+	sidebarMode            int
+	sidebarFiles           []string
+	sidebarDiff            string
+	sidebarPosition        int // 0=left, 1=right
+	sidebarScroll          int // scroll offset for sidebar content
+	sidebarCursor          int // selected item in sidebar (-1 = none)
 
 	// Modal state
 	activeModal   modalKind
@@ -242,38 +278,53 @@ func New(cfg Config) Model {
 	)
 
 	m := Model{
-		cwd:             cfg.CWD,
-		title:           title,
-		sessionID:       cfg.SessionID,
-		provider:        cfg.Provider,
-		model:           cfg.Model,
-		baseURL:         cfg.BaseURL,
-		reasoning:       cfg.Reasoning,
-		sandbox:         cfg.Sandbox,
-		approval:        cfg.Approval,
-		mode:            cfg.Mode,
-		cartCount:       cfg.CartCount,
-		maxContext:      cfg.MaxContext,
-		maxOutput:       cfg.MaxOutput,
-		maxSteps:        cfg.MaxSteps,
-		maxMessages:     cfg.MaxMessages,
-		maxInstructions: cfg.MaxInstructions,
-		fastModel:       cfg.FastModel,
-		editModel:       cfg.EditModel,
-		deepModel:       cfg.DeepModel,
-		handler:         handler,
-		pickerProvider:  cfg.PickerProvider,
-		input:           input,
-		commands:        cfg.Commands,
-		filteredCmds:    nil,
-		selectedCmdIdx:  0,
-		renderer:        renderer,
-		lines:           append([]string(nil), cfg.InitialLines...),
-		viewport:        viewport.New(80, 20),
-		history:         []string{},
-		historyIdx:      0,
-		reasoningText:   "",
-		reasonExpanded:  false,
+		cwd:                    cfg.CWD,
+		title:                  title,
+		sessionID:              cfg.SessionID,
+		provider:               cfg.Provider,
+		model:                  cfg.Model,
+		baseURL:                cfg.BaseURL,
+		reasoning:              cfg.Reasoning,
+		sandbox:                cfg.Sandbox,
+		approval:               cfg.Approval,
+		mode:                   cfg.Mode,
+		storeResponses:         cfg.StoreResponses,
+		cartCount:              cfg.CartCount,
+		maxContext:             cfg.MaxContext,
+		maxOutput:              cfg.MaxOutput,
+		maxSteps:               cfg.MaxSteps,
+		maxMessages:            cfg.MaxMessages,
+		maxInstructions:        cfg.MaxInstructions,
+		contextCockpit:         cfg.ContextCockpit,
+		contextCockpitInject:   cfg.ContextCockpitInject,
+		contextCockpitTokens:   cfg.ContextCockpitTokens,
+		contextCockpitMaxFiles: cfg.ContextCockpitMaxFiles,
+		contextCockpitDiff:     cfg.ContextCockpitDiff,
+		contextRecipes:         cfg.ContextRecipes,
+		negativeContext:        cfg.NegativeContext,
+		fastModel:              cfg.FastModel,
+		editModel:              cfg.EditModel,
+		deepModel:              cfg.DeepModel,
+		handler:                handler,
+		interrupt:              cfg.Interrupt,
+		pickerProvider:         cfg.PickerProvider,
+		input:                  input,
+		commands:               cfg.Commands,
+		filteredCmds:           nil,
+		selectedCmdIdx:         0,
+		renderer:               renderer,
+		lines:                  append([]string(nil), cfg.InitialLines...),
+		viewport:               viewport.New(80, 20),
+		history:                []string{},
+		historyIdx:             0,
+		reasoningText:          "",
+		reasonExpanded:         false,
+		sidebarVisible:         true,
+		sidebarFiles:           append([]string(nil), cfg.SidebarFiles...),
+		sidebarDiff:            cfg.SidebarDiff,
+		sidebarPosition:        cfg.SidebarPosition,
+		sidebarScroll:          0,
+		sidebarCursor:          -1,
 	}
 	m.width = 80
 	m.height = 24
@@ -306,6 +357,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
+		// If mouse event is in the sidebar area, consume it entirely so that
+		// the viewport below never sees it (prevents chat from scrolling when
+		// the user scrolls inside the sidebar).
+		if m.shouldRenderSidebar() && m.isInSidebarArea(msg.X) {
+			switch msg.Type {
+			case tea.MouseLeft:
+				if m.handleSidebarClick(msg.X, msg.Y) {
+					m.syncViewport(false)
+					return m, tea.ClearScreen
+				}
+			case tea.MouseWheelUp:
+				m.sidebarScrollUp(3)
+			case tea.MouseWheelDown:
+				m.sidebarScrollDown(3)
+			}
+			// Always consume — never let sidebar mouse events reach the viewport
+			return m, nil
+		}
 		switch msg.Type {
 		case tea.MouseLeft:
 			if m.handleViewportClick(msg.Y) {
@@ -314,12 +383,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.MouseWheelUp:
 			m.viewport.LineUp(3)
+			m.mouseFragmentTTL = 8
 			return m, nil
 		case tea.MouseWheelDown:
 			m.viewport.LineDown(3)
+			m.mouseFragmentTTL = 8
 			return m, nil
 		}
 	case tea.KeyMsg:
+		if m.isMouseEscapeKeyMsg(msg) {
+			return m, nil
+		}
+		if m.mouseFragmentTTL > 0 {
+			m.mouseFragmentTTL--
+		}
+
 		// Approval prompt takes highest priority
 		if m.approvalReq != nil {
 			switch msg.String() {
@@ -328,7 +406,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lines = append(m.lines, "system: approved "+m.approvalReq.Tool)
 				m.approvalReq = nil
 				return m, nil
-			case "n", "N", "esc":
+			case "n", "N", "esc", "ctrl+c":
 				m.approvalReq.Reply <- false
 				m.lines = append(m.lines, "system: rejected "+m.approvalReq.Tool)
 				m.approvalReq = nil
@@ -344,6 +422,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "ctrl+c":
+			if m.busy && m.interrupt != nil && m.interrupt() {
+				m.busy = false
+				m.interrupted = true
+				m.lines = append(m.lines, "", "system: interrupted current run")
+				m.syncViewport(true)
+				return m, tea.ClearScreen
+			}
 			return m, tea.Quit
 		case "f2", "ctrl+s":
 			m.openSettingsModal()
@@ -362,6 +447,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(tea.DisableMouse, tea.ExitAltScreen)
 			}
 			return m, tea.Batch(tea.EnterAltScreen, tea.EnableMouseCellMotion)
+		case "f7":
+			m.sidebarMode = (m.sidebarMode + 1) % 3
+			m.sidebarVisible = true
+			m.sidebarScroll = 0
+			m.sidebarCursor = -1
+			m.syncViewport(false)
+			return m, nil
+		case "alt+f7":
+			m.sidebarVisible = !m.sidebarVisible
+			m.syncViewport(false)
+			return m, nil
+		case "f8":
+			m.sidebarPosition = (m.sidebarPosition + 1) % 2
+			m.syncViewport(false)
+			return m, nil
 		case "pgup":
 			m.viewport.PageUp()
 			return m, nil
@@ -481,11 +581,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case ToolStreamMsg:
 		wasAtBottom := m.viewport.AtBottom()
+		m.flushLiveAssistantSegment()
 		m.appendToolStream(msg)
 		m.syncViewport(wasAtBottom)
 		return m, nil
 	case ToolProgressMsg:
 		wasAtBottom := m.viewport.AtBottom()
+		m.flushLiveAssistantSegment()
 		m.appendToolProgress(msg)
 		m.syncViewport(wasAtBottom)
 		return m, nil
@@ -513,29 +615,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case responseMsg:
 		wasAtBottom := m.viewport.AtBottom()
+		interrupted := msg.agentRun && m.interrupted && isCancelError(msg.err)
 		if msg.agentRun {
 			m.busy = false
 		}
-		streamedText := strings.TrimSpace(m.streamBuf)
-		if msg.agentRun {
-			m.streamBuf = ""
-		}
 		m.err = msg.err
+		if interrupted {
+			m.err = nil
+			msg.err = nil
+			m.interrupted = false
+		} else if msg.agentRun {
+			m.interrupted = false
+		}
+		if msg.agentRun {
+			m.flushLiveAssistantSegment()
+		}
 		if msg.err != nil {
 			m.lines = append(m.lines, "")
 			m.lines = append(m.lines, "error: "+msg.err.Error())
 		}
-		if msg.agentRun && streamedText != "" {
-			m.lines = append(m.lines, "")
-			m.appendThoughtsOutput(m.reasoningText, false)
-			m.reasoningText = ""
-			m.reasonExpanded = false
-			m.appendAgentOutput(streamedText)
-		}
 
 		outText := strings.TrimSpace(msg.output)
 		var debugText string
-		if idx := strings.Index(outText, "## Context Debugger"); idx >= 0 {
+		if idx := strings.Index(outText, "Context Debugger"); idx >= 0 {
 			debugText = strings.TrimSpace(outText[idx:])
 			outText = strings.TrimSpace(outText[:idx])
 		}
@@ -629,6 +731,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	prevVal := m.input.Value()
 	m.input, cmd = m.input.Update(msg)
+	if cleaned := sanitizeMouseEscapes(m.input.Value()); cleaned != m.input.Value() {
+		m.input.SetValue(cleaned)
+		m.input.SetCursor(len(cleaned))
+	}
 
 	if m.input.Value() != prevVal {
 		m.updateCompletions()
@@ -654,6 +760,43 @@ func (m *Model) updateCompletions() {
 	}
 }
 
+func (m Model) isMouseEscapeKeyMsg(msg tea.KeyMsg) bool {
+	if mouseEscapePattern.MatchString(msg.String()) {
+		return true
+	}
+	if len(msg.Runes) == 0 {
+		return false
+	}
+	text := string(msg.Runes)
+	return mouseEscapePattern.MatchString(text) || (m.mouseFragmentTTL > 0 && isMouseEscapeFragment(text))
+}
+
+func sanitizeMouseEscapes(value string) string {
+	value = mouseEscapePattern.ReplaceAllString(value, "")
+	return mouseEscapeFragmentPattern.ReplaceAllString(value, "")
+}
+
+func isMouseEscapeFragment(text string) bool {
+	if mouseEscapeFragmentPattern.MatchString(text) {
+		return true
+	}
+	return strings.Trim(text, "[") == ""
+}
+
+func isCancelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "context canceled") ||
+		strings.Contains(text, "context cancelled") ||
+		strings.Contains(text, "operation was canceled") ||
+		strings.Contains(text, "operation was cancelled")
+}
+
 func (m Model) calculateBodyHeight() int {
 	footerHeight := 2 // separator + footer text
 	inputHeight := 2  // separator + input text
@@ -673,16 +816,40 @@ func (m Model) calculateBodyHeight() int {
 	return bodyHeight
 }
 
+type formattedLineItem struct {
+	text   string
+	source int
+}
+
+const (
+	lineSourceNone         = -1
+	lineSourceLiveThoughts = -2
+)
+
 func (m Model) buildFormattedLines() []string {
+	items := m.buildFormattedLineItems()
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		lines = append(lines, item.text)
+	}
+	return lines
+}
+
+func (m Model) buildFormattedLineItems() []formattedLineItem {
 	headerLines := strings.Split(m.renderHeader(), "\n")
 
-	var formattedLines []string
-	formattedLines = append(formattedLines, headerLines...)
-	formattedLines = append(formattedLines, "") // breathing room after header
+	var items []formattedLineItem
+	add := func(source int, lines ...string) {
+		for _, line := range lines {
+			items = append(items, formattedLineItem{text: line, source: source})
+		}
+	}
+	add(lineSourceNone, headerLines...)
+	add(lineSourceNone, "") // breathing room after header
 
-	for _, line := range m.lines {
+	for idx, line := range m.lines {
 		if strings.HasPrefix(line, "you: ") {
-			formattedLines = append(formattedLines, userMsgStyle.Render("  "+userPrefix+" "+line[5:]))
+			add(idx, userMsgStyle.Render("  "+userPrefix+" "+line[5:]))
 		} else if strings.HasPrefix(line, "agent: ") {
 			text := line[7:]
 			if m.renderer != nil {
@@ -692,43 +859,43 @@ func (m Model) buildFormattedLines() []string {
 			}
 			agentLines := strings.Split(text, "\n")
 			for _, al := range agentLines {
-				formattedLines = append(formattedLines, agentBarStyle.Render(agentBar)+" "+agentMsgStyle.Render(al)+"\x1b[0m")
+				add(idx, agentBarStyle.Render(agentBar)+" "+agentMsgStyle.Render(al)+"\x1b[0m")
 			}
 		} else if strings.HasPrefix(line, "thoughts:") {
-			formattedLines = append(formattedLines, m.renderThoughtBlock(line)...)
+			add(idx, m.renderThoughtBlock(line)...)
 		} else if strings.HasPrefix(line, "error: ") {
-			formattedLines = append(formattedLines, errorMsgStyle.Render("  "+errorPrefix+" "+line[7:]))
+			add(idx, errorMsgStyle.Render("  "+errorPrefix+" "+line[7:]))
 		} else if strings.HasPrefix(line, "system: ") {
-			formattedLines = append(formattedLines, systemMsgStyle.Render("  "+systemPrefix+" "+line[8:]))
-		} else if strings.HasPrefix(line, "toolstream: ") {
-			formattedLines = append(formattedLines, m.renderToolStreamLine(line[len("toolstream: "):])...)
+			add(idx, systemMsgStyle.Render("  "+systemPrefix+" "+line[8:]))
+		} else if strings.HasPrefix(line, "toolstream:") {
+			add(idx, m.renderToolStreamLine(line)...)
 		} else if strings.HasPrefix(line, "toolprogress:") {
-			formattedLines = append(formattedLines, m.renderToolProgressLine(line)...)
+			add(idx, m.renderToolProgressLine(line)...)
 		} else if strings.HasPrefix(line, "tool:") {
-			formattedLines = append(formattedLines, m.renderToolLine(line)...)
+			add(idx, m.renderToolLine(line)...)
 		} else if strings.HasPrefix(line, "tool rejected: ") {
-			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  tool rejected: "+line[15:]))
+			add(idx, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  tool rejected: "+line[15:]))
 		} else if strings.HasPrefix(line, "tool error: ") {
-			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  tool error: "+line[12:]))
+			add(idx, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  tool error: "+line[12:]))
 		} else if strings.HasPrefix(line, "usage: ") {
-			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorDim).Render("  usage: "+line[7:]))
+			add(idx, lipgloss.NewStyle().Foreground(colorDim).Render("  usage: "+line[7:]))
 		} else if strings.HasPrefix(line, "policy: ") {
-			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorAmber).Render("  policy: "+line[8:]))
+			add(idx, lipgloss.NewStyle().Foreground(colorAmber).Render("  policy: "+line[8:]))
 		} else if strings.HasPrefix(line, "md: ") {
-			formattedLines = append(formattedLines, renderCommandOutputLine(line[4:]))
+			add(idx, renderCommandOutputLine(line[4:]))
 		} else if line == "" {
-			formattedLines = append(formattedLines, "")
+			add(idx, "")
 		} else {
-			formattedLines = append(formattedLines, systemMsgStyle.Render("  "+systemPrefix+" "+line))
+			add(idx, systemMsgStyle.Render("  "+systemPrefix+" "+line))
 		}
 	}
 
 	// Streaming content with spinner
 	if m.busy && m.streamBuf != "" {
-		formattedLines = append(formattedLines, "")
+		add(lineSourceNone, "")
 		if strings.TrimSpace(m.reasoningText) != "" {
-			formattedLines = append(formattedLines, m.renderLiveThoughtBlock()...)
-			formattedLines = append(formattedLines, "")
+			add(lineSourceLiveThoughts, m.renderLiveThoughtBlock()...)
+			add(lineSourceNone, "")
 		}
 
 		var rendered string
@@ -747,21 +914,20 @@ func (m Model) buildFormattedLines() []string {
 		}
 
 		for _, al := range agentLines {
-			formattedLines = append(formattedLines, agentBarStyle.Render(agentBar)+" "+agentMsgStyle.Render(al)+"\x1b[0m")
+			add(lineSourceNone, agentBarStyle.Render(agentBar)+" "+agentMsgStyle.Render(al)+"\x1b[0m")
 		}
 	} else if m.busy {
-		formattedLines = append(formattedLines, "")
+		add(lineSourceNone, "")
 		if strings.TrimSpace(m.reasoningText) != "" {
-			formattedLines = append(formattedLines, m.renderLiveThoughtBlock()...)
-			formattedLines = append(formattedLines, "")
+			add(lineSourceLiveThoughts, m.renderLiveThoughtBlock()...)
+			add(lineSourceNone, "")
 		}
-		formattedLines = append(formattedLines, m.renderThinkingBar())
+		add(lineSourceNone, m.renderThinkingBar())
 	}
 
 	if m.contextDebug != "" {
-		formattedLines = append(formattedLines, "")
 		if m.debugExpanded {
-			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorBrandDim).Render("  [F3] Hide Context Debugger"))
+			add(lineSourceNone, "")
 
 			// Render the debugger text via Glamour
 			text := m.contextDebug
@@ -771,18 +937,16 @@ func (m Model) buildFormattedLines() []string {
 				}
 			}
 			for _, line := range strings.Split(text, "\n") {
-				formattedLines = append(formattedLines, "  "+line)
+				add(lineSourceNone, "  "+line)
 			}
-		} else {
-			formattedLines = append(formattedLines, lipgloss.NewStyle().Foreground(colorBrandDim).Render("  [F3] Show Context Debugger"))
 		}
 	}
 
-	return formattedLines
+	return items
 }
 
 func (m *Model) syncViewport(scrollToBottom bool) {
-	m.viewport.Width = m.width
+	m.viewport.Width = m.chatWidth()
 	m.viewport.Height = m.calculateBodyHeight()
 
 	lines := m.buildFormattedLines()
@@ -798,6 +962,390 @@ func (m *Model) syncViewport(scrollToBottom bool) {
 	m.viewport.SetContent(strings.Join(lines, "\n"))
 	if scrollToBottom {
 		m.viewport.GotoBottom()
+	}
+}
+
+func (m Model) shouldRenderSidebar() bool {
+	return m.sidebarVisible && m.width >= 100
+}
+
+func (m Model) sidebarWidth() int {
+	if !m.shouldRenderSidebar() {
+		return 0
+	}
+	return min(34, max(26, m.width/4))
+}
+
+func (m Model) chatWidth() int {
+	width := m.width - m.sidebarWidth()
+	if width < 48 {
+		return max(20, m.width)
+	}
+	return width
+}
+
+func (m Model) renderSidebar(height int) string {
+	width := m.sidebarWidth()
+	if width <= 0 {
+		return ""
+	}
+	titleStyle := lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+	tabActive := lipgloss.NewStyle().Foreground(colorWhite).Background(colorBadgeBg).Padding(0, 1)
+	tabIdle := lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 1)
+	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	scrollIndicator := lipgloss.NewStyle().Foreground(colorBrandDim)
+
+	tabs := []string{"files", "diff", "context"}
+	var tabLine []string
+	for i, tab := range tabs {
+		if i == m.sidebarMode {
+			tabLine = append(tabLine, tabActive.Render(tab))
+		} else {
+			tabLine = append(tabLine, tabIdle.Render(tab))
+		}
+	}
+
+	posLabel := "◀"
+	if m.sidebarPosition == 1 {
+		posLabel = "▶"
+	}
+
+	headerLines := []string{
+		titleStyle.Render(" Klyra Sidebar") + " " + lipgloss.NewStyle().Foreground(colorMuted).Render(posLabel),
+		strings.Join(tabLine, ""),
+		"",
+	}
+
+	var contentLines []string
+	switch m.sidebarMode {
+	case 1:
+		contentLines = m.sidebarDiffLines(width - 4)
+	case 2:
+		contentLines = m.sidebarContextLines(width - 4)
+	default:
+		contentLines = m.sidebarFileLines(width - 4)
+	}
+
+	footerLines := []string{
+		"",
+		labelStyle.Render("F7 next · F8 " + []string{"→right", "→left"}[m.sidebarPosition]),
+	}
+
+	// Calculate scrollable area height
+	scrollAreaHeight := max(1, height-len(headerLines)-len(footerLines)-2)
+
+	// Apply scroll offset
+	scroll := m.sidebarScroll
+	if scroll > len(contentLines)-scrollAreaHeight {
+		scroll = max(0, len(contentLines)-scrollAreaHeight)
+	}
+	if scroll < 0 {
+		scroll = 0
+	}
+
+	// Build visible content with scroll
+	var visibleContent []string
+	if scroll > 0 {
+		visibleContent = append(visibleContent, scrollIndicator.Render("  ▲ "+fmt.Sprintf("%d more", scroll)))
+		scrollAreaHeight--
+	}
+	endIdx := scroll + scrollAreaHeight
+	if endIdx > len(contentLines) {
+		endIdx = len(contentLines)
+	}
+	for i := scroll; i < endIdx; i++ {
+		visibleContent = append(visibleContent, contentLines[i])
+	}
+	remaining := len(contentLines) - endIdx
+	if remaining > 0 {
+		visibleContent = append(visibleContent, scrollIndicator.Render("  ▼ "+fmt.Sprintf("%d more", remaining)))
+	}
+
+	var lines []string
+	lines = append(lines, headerLines...)
+	lines = append(lines, visibleContent...)
+	lines = append(lines, footerLines...)
+
+	content := strings.Join(lines, "\n")
+
+	// Position-aware border: left sidebar has right border, right sidebar has left border
+	borderRight := m.sidebarPosition == 0
+	borderLeft := m.sidebarPosition == 1
+	return lipgloss.NewStyle().
+		Width(width-1).
+		Height(height).
+		Border(lipgloss.NormalBorder(), false, borderRight, false, borderLeft).
+		BorderForeground(colorSeparator).
+		Padding(0, 1).
+		Render(content)
+}
+
+func (m Model) sidebarFileLines(width int) []string {
+	if len(m.sidebarFiles) == 0 {
+		return []string{lipgloss.NewStyle().Foreground(colorDim).Render("no file snapshot")}
+	}
+	headerStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	fileStyle := lipgloss.NewStyle().Foreground(colorText)
+	selectedStyle := lipgloss.NewStyle().Foreground(colorWhite).Background(colorBadgeBg)
+	countStyle := lipgloss.NewStyle().Foreground(colorDim)
+	lines := []string{headerStyle.Render("▪ workspace files") + " " + countStyle.Render(fmt.Sprintf("(%d)", len(m.sidebarFiles)))}
+	for idx, file := range m.sidebarFiles {
+		file = strings.TrimSpace(file)
+		if file == "" {
+			continue
+		}
+		icon := fileIcon(file)
+		entry := icon + " " + shorten(file, max(8, width-4))
+		if idx == m.sidebarCursor {
+			lines = append(lines, selectedStyle.Render(" ▸ "+entry+" "))
+		} else {
+			lines = append(lines, fileStyle.Render("  "+entry))
+		}
+	}
+	return lines
+}
+
+func (m Model) sidebarDiffLines(width int) []string {
+	diff := strings.TrimSpace(m.sidebarDiff)
+	if diff == "" || diff == "no tracked diff" {
+		return []string{lipgloss.NewStyle().Foreground(colorDim).Render("no tracked diff")}
+	}
+	lines := []string{lipgloss.NewStyle().Foreground(colorMuted).Render("tracked diff")}
+	for _, line := range strings.Split(diff, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		style := lipgloss.NewStyle().Foreground(colorDim)
+		if strings.HasPrefix(line, "+") {
+			style = lipgloss.NewStyle().Foreground(colorEmerald)
+		} else if strings.HasPrefix(line, "-") {
+			style = lipgloss.NewStyle().Foreground(colorRed)
+		} else if strings.HasPrefix(line, "diff ") || strings.HasPrefix(line, "@@") {
+			style = lipgloss.NewStyle().Foreground(colorAmber)
+		}
+		lines = append(lines, style.Render(shorten(line, max(8, width))))
+	}
+	return lines
+}
+
+func (m Model) sidebarContextLines(width int) []string {
+	lines := []string{
+		lipgloss.NewStyle().Foreground(colorMuted).Render("context"),
+		"  cart files: " + fmt.Sprintf("%d", m.cartCount),
+		"  cockpit: " + onOff(m.contextCockpit),
+		"  recipes: " + onOff(m.contextRecipes),
+		"  negative: " + onOff(m.negativeContext),
+		"  budget: " + formatNumber(m.contextCockpitTokens) + " / " + fmt.Sprintf("%d files", m.contextCockpitMaxFiles),
+		"",
+		lipgloss.NewStyle().Foreground(colorMuted).Render("runtime"),
+		"  mode: " + valueOr(m.mode, "edit"),
+		"  sandbox: " + valueOr(m.sandbox, "workspace-write"),
+		"  approval: " + valueOr(m.approval, "auto"),
+	}
+	if strings.TrimSpace(m.contextDebug) != "" {
+		lines = append(lines, "", lipgloss.NewStyle().Foreground(colorMuted).Render("debug"), "  available via F3")
+	}
+	for i, line := range lines {
+		lines[i] = shorten(line, max(8, width))
+	}
+	return lines
+}
+// ---------------------------------------------------------------------------
+// Sidebar helpers: icons, mouse, scroll
+// ---------------------------------------------------------------------------
+
+// fileIcon returns an appropriate icon for a file path based on its extension or name.
+func fileIcon(name string) string {
+	// Check if it looks like a directory (ends with / or has no extension)
+	if strings.HasSuffix(name, "/") {
+		return "▸"
+	}
+
+	ext := strings.ToLower(filepath.Ext(name))
+	base := strings.ToLower(filepath.Base(name))
+
+	// Special filenames
+	switch base {
+	case "dockerfile", "containerfile":
+		return "◈"
+	case "makefile", "cmakelists.txt":
+		return "⚙"
+	case ".gitignore", ".gitmodules", ".gitattributes":
+		return "±"
+	case "license", "licence", "license.md", "licence.md":
+		return "§"
+	case "readme.md", "readme", "readme.txt":
+		return "¶"
+	case "go.mod", "go.sum":
+		return "⊕"
+	case "package.json", "package-lock.json":
+		return "◫"
+	case "cargo.toml", "cargo.lock":
+		return "◫"
+	case ".env", ".env.local", ".env.example":
+		return "⊘"
+	}
+
+	// Extension-based icons
+	switch ext {
+	case ".go":
+		return "◆"
+	case ".py":
+		return "◇"
+	case ".js", ".jsx", ".mjs":
+		return "●"
+	case ".ts", ".tsx":
+		return "◉"
+	case ".rs":
+		return "⬥"
+	case ".rb":
+		return "◈"
+	case ".java", ".kt", ".kts":
+		return "○"
+	case ".c", ".h":
+		return "■"
+	case ".cpp", ".cc", ".cxx", ".hpp":
+		return "■"
+	case ".cs":
+		return "□"
+	case ".swift":
+		return "▪"
+	case ".html", ".htm":
+		return "◌"
+	case ".css", ".scss", ".sass", ".less":
+		return "◍"
+	case ".json":
+		return "⊞"
+	case ".yaml", ".yml":
+		return "≡"
+	case ".toml":
+		return "≡"
+	case ".xml":
+		return "⊟"
+	case ".md", ".markdown":
+		return "¶"
+	case ".txt":
+		return "─"
+	case ".sh", ".bash", ".zsh", ".fish":
+		return "$"
+	case ".sql":
+		return "⊡"
+	case ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico":
+		return "◩"
+	case ".mp3", ".wav", ".ogg", ".flac":
+		return "♫"
+	case ".mp4", ".avi", ".mov", ".mkv", ".webm":
+		return "▶"
+	case ".zip", ".tar", ".gz", ".bz2", ".xz", ".rar", ".7z":
+		return "◫"
+	case ".pdf":
+		return "▥"
+	case ".doc", ".docx":
+		return "▤"
+	case ".xls", ".xlsx":
+		return "▦"
+	case ".log":
+		return "≋"
+	case ".lock":
+		return "⊗"
+	case ".mod", ".sum":
+		return "⊕"
+	case ".proto":
+		return "⚡"
+	case ".graphql", ".gql":
+		return "⬡"
+	case ".test.go", ".spec.js", ".spec.ts", ".test.js", ".test.ts":
+		return "✓"
+	default:
+		if ext == "" {
+			return "▸" // likely a directory
+		}
+		return "○"
+	}
+}
+
+// isInSidebarArea checks if the given X coordinate falls within the sidebar region.
+func (m Model) isInSidebarArea(x int) bool {
+	sw := m.sidebarWidth()
+	if sw <= 0 {
+		return false
+	}
+	if m.sidebarPosition == 0 {
+		// Sidebar on the left
+		return x < sw
+	}
+	// Sidebar on the right
+	return x >= m.width-sw
+}
+
+// handleSidebarClick processes a mouse click within the sidebar area.
+// It checks whether the click is on a tab header or on a file item.
+func (m *Model) handleSidebarClick(x, y int) bool {
+	// y==0 is the title line, y==1 is the tab bar
+	if y == 1 {
+		// Click on tab bar — cycle sidebar mode
+		m.sidebarMode = (m.sidebarMode + 1) % 3
+		m.sidebarScroll = 0
+		m.sidebarCursor = -1
+		return true
+	}
+
+	// Only handle file clicks in files mode
+	if m.sidebarMode != 0 || len(m.sidebarFiles) == 0 {
+		return false
+	}
+
+	// Header lines in renderSidebar: title(0), tabs(1), blank(2), then "workspace files" header(3)
+	// File items start at y==4 relative to sidebar top
+	contentStartY := 4
+	if m.sidebarScroll > 0 {
+		// There's a "▲ N more" line, so content shifts down by 1
+		contentStartY++
+	}
+
+	fileIdx := (y - contentStartY) + m.sidebarScroll
+	if fileIdx >= 0 && fileIdx < len(m.sidebarFiles) {
+		if m.sidebarCursor == fileIdx {
+			m.sidebarCursor = -1 // deselect on second click
+		} else {
+			m.sidebarCursor = fileIdx
+		}
+		return true
+	}
+	return false
+}
+
+// sidebarScrollUp scrolls the sidebar content up by n lines.
+func (m *Model) sidebarScrollUp(n int) {
+	m.sidebarScroll -= n
+	if m.sidebarScroll < 0 {
+		m.sidebarScroll = 0
+	}
+}
+
+// sidebarScrollDown scrolls the sidebar content down by n lines.
+func (m *Model) sidebarScrollDown(n int) {
+	m.sidebarScroll += n
+	maxScroll := m.sidebarContentLineCount() - 5
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if m.sidebarScroll > maxScroll {
+		m.sidebarScroll = maxScroll
+	}
+}
+
+// sidebarContentLineCount returns the total number of content lines for the current sidebar mode.
+func (m Model) sidebarContentLineCount() int {
+	width := m.sidebarWidth() - 4
+	switch m.sidebarMode {
+	case 1:
+		return len(m.sidebarDiffLines(width))
+	case 2:
+		return len(m.sidebarContextLines(width))
+	default:
+		return len(m.sidebarFileLines(width))
 	}
 }
 
@@ -821,6 +1369,14 @@ func (m Model) View() string {
 
 	// Body from viewport
 	body := m.viewport.View()
+	if m.shouldRenderSidebar() && m.activeModal == modalNone && m.approvalReq == nil {
+		sidebar := m.renderSidebar(m.viewport.Height)
+		if m.sidebarPosition == 1 {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, body, sidebar)
+		} else {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, body)
+		}
+	}
 
 	// Overlays: approval prompt
 	if m.approvalReq != nil {
@@ -953,7 +1509,11 @@ func (m *Model) openSettingsModal() {
 		valueOr(m.approval, "auto"),
 		valueOr(m.sandbox, "workspace-write"),
 		valueOr(m.mode, "edit"),
+		m.storeResponses,
 		m.maxContext, m.maxOutput, m.maxSteps, m.maxMessages, m.maxInstructions,
+		m.contextCockpit, m.contextCockpitInject,
+		m.contextCockpitTokens, m.contextCockpitMaxFiles, m.contextCockpitDiff,
+		m.contextRecipes, m.negativeContext,
 		m.fastModel, m.editModel, m.deepModel,
 	)
 	m.settingsModal = &sm
@@ -1132,7 +1692,12 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		sm.Backspace()
 		return m, nil
-	case "enter", "ctrl+s":
+	case "enter":
+		if sm.ToggleCurrentSection() {
+			return m, nil
+		}
+		fallthrough
+	case "ctrl+s":
 		// Save all settings
 		m.provider = sm.GetValue("provider")
 		m.model = sm.GetValue("model")
@@ -1141,6 +1706,7 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.approval = sm.GetValue("approval")
 		m.sandbox = sm.GetValue("sandbox")
 		m.mode = sm.GetValue("mode")
+		m.storeResponses = sm.GetValue("store") == "on"
 		if parsed := parsePositiveInt(sm.GetValue("context")); parsed > 0 {
 			m.maxContext = parsed
 		}
@@ -1156,6 +1722,17 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if parsed := parsePositiveInt(sm.GetValue("instructions")); parsed > 0 {
 			m.maxInstructions = parsed
 		}
+		m.contextCockpit = sm.GetValue("context_cockpit") != "off"
+		m.contextCockpitInject = sm.GetValue("context_cockpit_inject") != "off"
+		if parsed := parsePositiveInt(sm.GetValue("context_cockpit_tokens")); parsed > 0 {
+			m.contextCockpitTokens = parsed
+		}
+		if parsed := parsePositiveInt(sm.GetValue("context_cockpit_files")); parsed > 0 {
+			m.contextCockpitMaxFiles = parsed
+		}
+		m.contextCockpitDiff = sm.GetValue("context_cockpit_diff") != "off"
+		m.contextRecipes = sm.GetValue("context_recipes") != "off"
+		m.negativeContext = sm.GetValue("negative_context") != "off"
 		m.fastModel = sm.GetValue("fast_model")
 		m.editModel = sm.GetValue("edit_model")
 		m.deepModel = sm.GetValue("deep_model")
@@ -1173,8 +1750,19 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			"approval="+valueOr(m.approval, "auto"),
 			"sandbox="+valueOr(m.sandbox, "workspace-write"),
 			"mode="+valueOr(m.mode, "edit"),
+			"store="+onOff(m.storeResponses),
 			fmt.Sprintf("context=%d", m.maxContext),
 			fmt.Sprintf("output=%d", m.maxOutput),
+			fmt.Sprintf("steps=%d", m.maxSteps),
+			fmt.Sprintf("messages=%d", m.maxMessages),
+			fmt.Sprintf("instructions=%d", m.maxInstructions),
+			"context_cockpit="+onOff(m.contextCockpit),
+			"context_cockpit_inject="+onOff(m.contextCockpitInject),
+			fmt.Sprintf("context_cockpit_tokens=%d", m.contextCockpitTokens),
+			fmt.Sprintf("context_cockpit_files=%d", m.contextCockpitMaxFiles),
+			"context_cockpit_diff="+onOff(m.contextCockpitDiff),
+			"context_recipes="+onOff(m.contextRecipes),
+			"negative_context="+onOff(m.negativeContext),
 		)
 		cmdText := strings.Join(parts, " ")
 
@@ -1311,7 +1899,20 @@ func (m Model) renderFooter() string {
 	if m.copyMode {
 		copyHint = "F6 scroll"
 	}
-	settingsHint := lipgloss.NewStyle().Foreground(colorMuted).Render("F2 settings  " + copyHint)
+	sidebarHint := "F7 sidebar"
+	if m.shouldRenderSidebar() {
+		sidebarHint = "F7 " + []string{"files", "diff", "context"}[m.sidebarMode]
+	}
+	posHint := "F8 " + []string{"→right", "→left"}[m.sidebarPosition]
+	hints := []string{"F2 settings", sidebarHint, posHint, copyHint}
+	if m.contextDebug != "" {
+		if m.debugExpanded {
+			hints = append([]string{"F3 hide context"}, hints...)
+		} else {
+			hints = append([]string{"F3 context"}, hints...)
+		}
+	}
+	settingsHint := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(hints, "  "))
 	rightFooter := modelStyle.Render(valueOr(m.model, "routed")) + "  " + settingsHint + " "
 
 	separator := sepStyle.Render(strings.Repeat("─", max(10, m.width)))
@@ -1324,32 +1925,38 @@ func (m Model) renderFooter() string {
 // ---------------------------------------------------------------------------
 
 func (m Model) renderThinkingBar() string {
-	barLen := pulseSizes[m.spinnerFrame%len(pulseSizes)]
-	colorOffset := m.spinnerFrame * 2 // flow speed
+	const barWidth = 12
+	head := m.spinnerFrame % barWidth
 
 	var bar strings.Builder
-	for i := 0; i < barLen; i++ {
-		// Pick gradient color (flows over time)
-		cIdx := (i + colorOffset) % len(gradientPalette)
-		col := gradientPalette[cIdx]
-
-		// Pick block density char (fade at edges)
-		var ch rune
-		distFromEdge := i
-		if barLen-1-i < distFromEdge {
-			distFromEdge = barLen - 1 - i
-		}
-		if distFromEdge >= len(densityChars) {
-			ch = densityChars[len(densityChars)-1] // full block
-		} else {
-			ch = densityChars[distFromEdge]
-		}
-
+	for i := 0; i < barWidth; i++ {
+		distance := circularDistance(i, head, barWidth)
+		densityIdx := max(0, len(densityChars)-1-distance)
+		ch := densityChars[densityIdx]
+		col := gradientPalette[(i+m.spinnerFrame)%len(gradientPalette)]
 		bar.WriteString(lipgloss.NewStyle().Foreground(col).Render(string(ch)))
 	}
 
 	label := lipgloss.NewStyle().Foreground(colorMuted).Italic(true).Render(" thinking...")
 	return "  " + bar.String() + label
+}
+
+func circularDistance(a, b, width int) int {
+	if width <= 0 {
+		return 0
+	}
+	diff := abs(a - b)
+	if width-diff < diff {
+		return width - diff
+	}
+	return diff
+}
+
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 // ---------------------------------------------------------------------------
@@ -1446,6 +2053,8 @@ func (m *Model) applyOptimisticCommand(value string) {
 				m.sandbox = value
 			case "mode":
 				m.mode = value
+			case "store":
+				m.storeResponses = value == "on"
 			case "context":
 				if parsed := parsePositiveInt(value); parsed > 0 {
 					m.maxContext = parsed
@@ -1454,6 +2063,36 @@ func (m *Model) applyOptimisticCommand(value string) {
 				if parsed := parsePositiveInt(value); parsed > 0 {
 					m.maxOutput = parsed
 				}
+			case "steps":
+				if parsed := parsePositiveInt(value); parsed > 0 {
+					m.maxSteps = parsed
+				}
+			case "messages":
+				if parsed := parsePositiveInt(value); parsed > 0 {
+					m.maxMessages = parsed
+				}
+			case "instructions":
+				if parsed := parsePositiveInt(value); parsed > 0 {
+					m.maxInstructions = parsed
+				}
+			case "context_cockpit":
+				m.contextCockpit = value != "off"
+			case "context_cockpit_inject":
+				m.contextCockpitInject = value != "off"
+			case "context_cockpit_tokens":
+				if parsed := parsePositiveInt(value); parsed > 0 {
+					m.contextCockpitTokens = parsed
+				}
+			case "context_cockpit_files":
+				if parsed := parsePositiveInt(value); parsed > 0 {
+					m.contextCockpitMaxFiles = parsed
+				}
+			case "context_cockpit_diff":
+				m.contextCockpitDiff = value != "off"
+			case "context_recipes":
+				m.contextRecipes = value != "off"
+			case "negative_context":
+				m.negativeContext = value != "off"
 			}
 		}
 	case "/provider":
@@ -1592,6 +2231,20 @@ func (m *Model) appendAgentOutput(text string) {
 	m.lines = append(m.lines, "agent: "+text)
 }
 
+func (m *Model) flushLiveAssistantSegment() {
+	if strings.TrimSpace(m.reasoningText) == "" && strings.TrimSpace(m.streamBuf) == "" {
+		return
+	}
+	if len(m.lines) > 0 && m.lines[len(m.lines)-1] != "" {
+		m.lines = append(m.lines, "")
+	}
+	m.appendThoughtsOutput(m.reasoningText, false)
+	m.appendAgentOutput(m.streamBuf)
+	m.streamBuf = ""
+	m.reasoningText = ""
+	m.reasonExpanded = false
+}
+
 func (m *Model) appendThoughtsOutput(text string, expanded bool) {
 	if strings.TrimSpace(text) == "" {
 		return
@@ -1604,12 +2257,50 @@ func (m *Model) appendThoughtsOutput(text string, expanded bool) {
 }
 
 func (m *Model) appendToolStream(msg ToolStreamMsg) {
-	if strings.TrimSpace(msg.Name) == "" && strings.TrimSpace(msg.ArgumentsDelta) == "" {
+	if strings.TrimSpace(msg.Name) == "" && strings.TrimSpace(msg.Arguments) == "" && strings.TrimSpace(msg.ID) == "" {
+		return
+	}
+	for i := len(m.lines) - 1; i >= 0; i-- {
+		if !strings.HasPrefix(m.lines[i], "toolstream:") {
+			continue
+		}
+		expanded, raw := parseCollapsiblePayload(m.lines[i], "toolstream")
+		var existing ToolStreamMsg
+		if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+			continue
+		}
+		if !sameToolStream(existing, msg) {
+			continue
+		}
+		if strings.TrimSpace(msg.ID) != "" {
+			existing.ID = msg.ID
+		}
+		if strings.TrimSpace(msg.Name) != "" {
+			existing.Name = msg.Name
+		}
+		existing.Arguments += msg.Arguments
+		if data, err := json.Marshal(existing); err == nil {
+			state := "0"
+			if expanded {
+				state = "1"
+			}
+			m.lines[i] = "toolstream:" + state + ":" + string(data)
+		}
 		return
 	}
 	if data, err := json.Marshal(msg); err == nil {
-		m.lines = append(m.lines, "toolstream: "+string(data))
+		m.lines = append(m.lines, "toolstream:0:"+string(data))
 	}
+}
+
+func sameToolStream(existing, next ToolStreamMsg) bool {
+	if strings.TrimSpace(existing.ID) != "" && strings.TrimSpace(next.ID) != "" {
+		return existing.ID == next.ID
+	}
+	if existing.Index == next.Index {
+		return true
+	}
+	return false
 }
 
 func (m *Model) appendToolProgress(msg ToolProgressMsg) {
@@ -1661,6 +2352,12 @@ func (m *Model) toggleLatestThoughtsExpand(expanded bool) bool {
 func (m *Model) toggleLatestToolDetails() bool {
 	for i := len(m.lines) - 1; i >= 0; i-- {
 		switch {
+		case strings.HasPrefix(m.lines[i], "toolstream:0:"):
+			m.lines[i] = "toolstream:1:" + strings.TrimPrefix(m.lines[i], "toolstream:0:")
+			return true
+		case strings.HasPrefix(m.lines[i], "toolstream:1:"):
+			m.lines[i] = "toolstream:0:" + strings.TrimPrefix(m.lines[i], "toolstream:1:")
+			return true
 		case strings.HasPrefix(m.lines[i], "toolprogress:0:"):
 			m.lines[i] = "toolprogress:1:" + strings.TrimPrefix(m.lines[i], "toolprogress:0:")
 			return true
@@ -1681,33 +2378,86 @@ func (m *Model) toggleLatestToolDetails() bool {
 	return false
 }
 
+func (m *Model) toggleLineDetails(index int) bool {
+	if index == lineSourceLiveThoughts {
+		m.reasonExpanded = !m.reasonExpanded
+		return true
+	}
+	if index < 0 || index >= len(m.lines) {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(m.lines[index], "thoughts:0:"):
+		m.lines[index] = "thoughts:1:" + strings.TrimPrefix(m.lines[index], "thoughts:0:")
+		return true
+	case strings.HasPrefix(m.lines[index], "thoughts:1:"):
+		m.lines[index] = "thoughts:0:" + strings.TrimPrefix(m.lines[index], "thoughts:1:")
+		return true
+	case strings.HasPrefix(m.lines[index], "toolstream:0:"):
+		m.lines[index] = "toolstream:1:" + strings.TrimPrefix(m.lines[index], "toolstream:0:")
+		return true
+	case strings.HasPrefix(m.lines[index], "toolstream:1:"):
+		m.lines[index] = "toolstream:0:" + strings.TrimPrefix(m.lines[index], "toolstream:1:")
+		return true
+	case strings.HasPrefix(m.lines[index], "toolprogress:0:"):
+		m.lines[index] = "toolprogress:1:" + strings.TrimPrefix(m.lines[index], "toolprogress:0:")
+		return true
+	case strings.HasPrefix(m.lines[index], "toolprogress:1:"):
+		m.lines[index] = "toolprogress:0:" + strings.TrimPrefix(m.lines[index], "toolprogress:1:")
+		return true
+	case strings.HasPrefix(m.lines[index], "tool:0:"):
+		m.lines[index] = "tool:1:" + strings.TrimPrefix(m.lines[index], "tool:0:")
+		return true
+	case strings.HasPrefix(m.lines[index], "tool:1:"):
+		m.lines[index] = "tool:0:" + strings.TrimPrefix(m.lines[index], "tool:1:")
+		return true
+	case strings.HasPrefix(m.lines[index], "tool: "):
+		m.lines[index] = "tool:1:" + strings.TrimPrefix(m.lines[index], "tool: ")
+		return true
+	}
+	return false
+}
+
 func (m *Model) handleViewportClick(y int) bool {
 	if y < 0 || y >= m.viewport.Height {
 		return false
 	}
-	lines := m.currentViewportLines()
+	items := m.currentViewportItems()
 	index := m.viewport.YOffset + y
-	if index < 0 || index >= len(lines) {
+	if index < 0 || index >= len(items) {
 		return false
 	}
-	plain := stripANSICodes(lines[index])
+	item := items[index]
+	plain := stripANSICodes(item.text)
 	if strings.Contains(plain, "Thinking") || strings.Contains(plain, "Thoughts") {
-		return m.toggleLatestThoughts()
+		return m.toggleLineDetails(item.source)
 	}
 	if strings.Contains(plain, "▸ ") || strings.Contains(plain, "▾ ") || strings.Contains(plain, "details") {
-		return m.toggleLatestToolDetails()
+		return m.toggleLineDetails(item.source)
 	}
 	return false
 }
 
 func (m Model) currentViewportLines() []string {
-	lines := m.buildFormattedLines()
-	padding := m.viewport.Height - len(lines)
-	if padding > 0 {
-		paddedLines := make([]string, padding)
-		lines = append(paddedLines, lines...)
+	items := m.currentViewportItems()
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		lines = append(lines, item.text)
 	}
 	return lines
+}
+
+func (m Model) currentViewportItems() []formattedLineItem {
+	items := m.buildFormattedLineItems()
+	padding := m.viewport.Height - len(items)
+	if padding > 0 {
+		padded := make([]formattedLineItem, padding)
+		for i := range padded {
+			padded[i] = formattedLineItem{source: lineSourceNone}
+		}
+		items = append(padded, items...)
+	}
+	return items
 }
 
 func stripANSICodes(value string) string {
@@ -1795,6 +2545,7 @@ type toolDisplay struct {
 }
 
 func (m Model) renderToolStreamLine(raw string) []string {
+	expanded, raw := parseCollapsiblePayload(raw, "toolstream")
 	var msg ToolStreamMsg
 	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
 		return []string{lipgloss.NewStyle().Foreground(colorEmerald).Render("  ◇ tool call " + raw)}
@@ -1803,14 +2554,26 @@ func (m Model) renderToolStreamLine(raw string) []string {
 	if name == "" {
 		name = "tool"
 	}
-	delta := strings.TrimSpace(msg.ArgumentsDelta)
+	args := strings.TrimSpace(msg.Arguments)
 	headerStyle := lipgloss.NewStyle().Foreground(colorEmerald).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.width-12))
-	lines := []string{"  " + headerStyle.Render("◇ "+name) + " " + labelStyle.Render("model is preparing tool call")}
-	if delta != "" {
-		for _, line := range strings.Split(bodyStyle.Render(delta), "\n") {
-			lines = append(lines, "  "+lipgloss.NewStyle().Foreground(colorMuted).Render("│")+" "+line)
+	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	icon := "▸"
+	if expanded {
+		icon = "▾"
+	}
+	summary := "model is preparing tool call"
+	if args != "" {
+		summary += ", " + outputSummary(args, 64)
+	}
+	lines := []string{"  " + headerStyle.Render(icon+" "+name) + " " + labelStyle.Render(summary)}
+	if !expanded {
+		return lines
+	}
+	if args != "" {
+		for _, line := range strings.Split(bodyStyle.Render(args), "\n") {
+			lines = append(lines, "  "+borderStyle.Render("│")+" "+line)
 		}
 	}
 	return lines

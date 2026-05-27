@@ -19,10 +19,11 @@ const (
 	secAPIKeys
 	secSafety
 	secLimits
+	secContext
 	secRouting
 )
 
-var sectionNames = []string{"PROVIDER", "API KEYS", "SAFETY", "LIMITS", "ROUTING"}
+var sectionNames = []string{"PROVIDER", "API KEYS", "SAFETY", "LIMITS", "CONTEXT", "ROUTING"}
 
 // settingsField represents one editable field in the settings modal.
 type settingsField struct {
@@ -39,18 +40,24 @@ type settingsField struct {
 // SettingsModal is the full settings editor overlay.
 type SettingsModal struct {
 	Fields     []settingsField
-	Cursor     int
+	Cursor     int    // visible row cursor, including section rows
 	EditBuffer string // for text fields being edited
 	Editing    bool   // true when actively typing into a text field
 	Width      int
 	Scroll     int
 	MaxVisible int
+	Expanded   map[settingsSection]bool
 }
 
 // NewSettingsModal creates a settings modal pre-populated with current values.
 func NewSettingsModal(
 	provider, model, endpoint, reasoning, approval, sandbox, mode string,
+	storeResponses bool,
 	maxContext, maxOutput, maxSteps, maxMessages, maxInstructions int,
+	contextCockpit, contextCockpitInject bool,
+	contextCockpitTokens, contextCockpitMaxFiles int,
+	contextCockpitDiff bool,
+	contextRecipes, negativeContext bool,
 	fastModel, editModel, deepModel string,
 ) SettingsModal {
 	fields := []settingsField{
@@ -69,6 +76,7 @@ func NewSettingsModal(
 		{Section: secSafety, Name: "approval", DisplayName: "Approval", Value: approval, Choices: []string{"auto", "ask", "never"}},
 		{Section: secSafety, Name: "sandbox", DisplayName: "Sandbox", Value: sandbox, Choices: []string{"read-only", "workspace-write", "danger-full-access"}},
 		{Section: secSafety, Name: "mode", DisplayName: "Mode", Value: mode, Choices: []string{"inspect", "edit", "repair", "refactor"}},
+		{Section: secSafety, Name: "store", DisplayName: "Provider Store", Value: onOff(storeResponses), Choices: []string{"on", "off"}},
 
 		// Limits section
 		{Section: secLimits, Name: "context", DisplayName: "Context Tokens", Value: fmt.Sprintf("%d", maxContext)},
@@ -76,6 +84,15 @@ func NewSettingsModal(
 		{Section: secLimits, Name: "steps", DisplayName: "Max Steps", Value: fmt.Sprintf("%d", maxSteps)},
 		{Section: secLimits, Name: "messages", DisplayName: "Max Messages", Value: fmt.Sprintf("%d", maxMessages)},
 		{Section: secLimits, Name: "instructions", DisplayName: "Instruction Bytes", Value: fmt.Sprintf("%d", maxInstructions)},
+
+		// Context section
+		{Section: secContext, Name: "context_cockpit", DisplayName: "Cockpit", Value: onOff(contextCockpit), Choices: []string{"on", "off"}},
+		{Section: secContext, Name: "context_cockpit_inject", DisplayName: "Inject Cards", Value: onOff(contextCockpitInject), Choices: []string{"on", "off"}},
+		{Section: secContext, Name: "context_cockpit_tokens", DisplayName: "Cockpit Tokens", Value: fmt.Sprintf("%d", contextCockpitTokens)},
+		{Section: secContext, Name: "context_cockpit_files", DisplayName: "Repo Map Files", Value: fmt.Sprintf("%d", contextCockpitMaxFiles)},
+		{Section: secContext, Name: "context_cockpit_diff", DisplayName: "Include Diff", Value: onOff(contextCockpitDiff), Choices: []string{"on", "off"}},
+		{Section: secContext, Name: "context_recipes", DisplayName: "Scoped Recipes", Value: onOff(contextRecipes), Choices: []string{"on", "off"}},
+		{Section: secContext, Name: "negative_context", DisplayName: "Negative Context", Value: onOff(negativeContext), Choices: []string{"on", "off"}},
 
 		// Routing section
 		{Section: secRouting, Name: "fast_model", DisplayName: "Fast Model", Value: fastModel},
@@ -86,9 +103,17 @@ func NewSettingsModal(
 	return SettingsModal{
 		Fields:     fields,
 		Cursor:     0,
-		Width:      60,
-		MaxVisible: 24,
+		Width:      72,
+		MaxVisible: 18,
+		Expanded:   map[settingsSection]bool{},
 	}
+}
+
+func onOff(value bool) string {
+	if value {
+		return "on"
+	}
+	return "off"
 }
 
 func (s *SettingsModal) MoveUp() {
@@ -97,7 +122,7 @@ func (s *SettingsModal) MoveUp() {
 	}
 	s.Cursor--
 	if s.Cursor < 0 {
-		s.Cursor = len(s.Fields) - 1
+		s.Cursor = len(s.visibleRows()) - 1
 	}
 	s.adjustScroll()
 }
@@ -107,14 +132,23 @@ func (s *SettingsModal) MoveDown() {
 		return
 	}
 	s.Cursor++
-	if s.Cursor >= len(s.Fields) {
+	if s.Cursor >= len(s.visibleRows()) {
 		s.Cursor = 0
 	}
 	s.adjustScroll()
 }
 
 func (s *SettingsModal) CycleLeft() {
-	f := &s.Fields[s.Cursor]
+	row, ok := s.currentRow()
+	if !ok {
+		return
+	}
+	if row.IsSection {
+		s.setExpanded(row.Section, false)
+		s.adjustScroll()
+		return
+	}
+	f := &s.Fields[row.FieldIndex]
 	if len(f.Choices) == 0 || f.ReadOnly {
 		return
 	}
@@ -130,7 +164,16 @@ func (s *SettingsModal) CycleLeft() {
 }
 
 func (s *SettingsModal) CycleRight() {
-	f := &s.Fields[s.Cursor]
+	row, ok := s.currentRow()
+	if !ok {
+		return
+	}
+	if row.IsSection {
+		s.setExpanded(row.Section, true)
+		s.adjustScroll()
+		return
+	}
+	f := &s.Fields[row.FieldIndex]
 	if len(f.Choices) == 0 || f.ReadOnly {
 		return
 	}
@@ -147,7 +190,10 @@ func (s *SettingsModal) CycleRight() {
 
 // StartEdit begins editing a text field.
 func (s *SettingsModal) StartEdit() {
-	f := &s.Fields[s.Cursor]
+	f := s.currentField()
+	if f == nil {
+		return
+	}
 	if len(f.Choices) > 0 || f.ReadOnly {
 		return
 	}
@@ -159,7 +205,10 @@ func (s *SettingsModal) StartEdit() {
 func (s *SettingsModal) TypeChar(ch string) {
 	if !s.Editing {
 		// Auto-start edit for text fields
-		f := &s.Fields[s.Cursor]
+		f := s.currentField()
+		if f == nil {
+			return
+		}
 		if len(f.Choices) > 0 || f.ReadOnly {
 			return
 		}
@@ -167,13 +216,18 @@ func (s *SettingsModal) TypeChar(ch string) {
 		s.EditBuffer = f.Value
 	}
 	s.EditBuffer += ch
-	s.Fields[s.Cursor].Value = s.EditBuffer
+	if f := s.currentField(); f != nil {
+		f.Value = s.EditBuffer
+	}
 }
 
 // Backspace removes the last character from the edit buffer.
 func (s *SettingsModal) Backspace() {
 	if !s.Editing {
-		f := &s.Fields[s.Cursor]
+		f := s.currentField()
+		if f == nil {
+			return
+		}
 		if len(f.Choices) > 0 || f.ReadOnly {
 			return
 		}
@@ -183,42 +237,39 @@ func (s *SettingsModal) Backspace() {
 	if len(s.EditBuffer) > 0 {
 		s.EditBuffer = s.EditBuffer[:len(s.EditBuffer)-1]
 	}
-	s.Fields[s.Cursor].Value = s.EditBuffer
+	if f := s.currentField(); f != nil {
+		f.Value = s.EditBuffer
+	}
 }
 
 // CommitEdit finishes editing and commits the value.
 func (s *SettingsModal) CommitEdit() {
 	if s.Editing {
-		s.Fields[s.Cursor].Value = s.EditBuffer
+		if f := s.currentField(); f != nil {
+			f.Value = s.EditBuffer
+		}
 		s.Editing = false
 	}
 }
 
 func (s *SettingsModal) adjustScroll() {
-	// Calculate line index for current cursor (accounting for section headers)
-	lineIdx := s.cursorLineIndex()
-	if lineIdx < s.Scroll {
-		s.Scroll = lineIdx
+	if s.Cursor < 0 {
+		s.Cursor = 0
 	}
-	if lineIdx >= s.Scroll+s.MaxVisible {
-		s.Scroll = lineIdx - s.MaxVisible + 1
+	rows := s.visibleRows()
+	if len(rows) == 0 {
+		s.Scroll = 0
+		return
 	}
-}
-
-func (s *SettingsModal) cursorLineIndex() int {
-	line := 0
-	lastSection := settingsSection(-1)
-	for i := 0; i <= s.Cursor && i < len(s.Fields); i++ {
-		if s.Fields[i].Section != lastSection {
-			line += 2 // section header + blank line
-			lastSection = s.Fields[i].Section
-		}
-		if i == s.Cursor {
-			return line
-		}
-		line++
+	if s.Cursor >= len(rows) {
+		s.Cursor = len(rows) - 1
 	}
-	return line
+	if s.Cursor < s.Scroll {
+		s.Scroll = s.Cursor
+	}
+	if s.Cursor >= s.Scroll+s.MaxVisible {
+		s.Scroll = s.Cursor - s.MaxVisible + 1
+	}
 }
 
 // GetValue returns the current value of a field by name.
@@ -229,6 +280,67 @@ func (s *SettingsModal) GetValue(name string) string {
 		}
 	}
 	return ""
+}
+
+func (s *SettingsModal) ToggleCurrentSection() bool {
+	row, ok := s.currentRow()
+	if !ok || !row.IsSection {
+		return false
+	}
+	s.setExpanded(row.Section, !s.isExpanded(row.Section))
+	s.adjustScroll()
+	return true
+}
+
+type settingsRow struct {
+	IsSection  bool
+	Section    settingsSection
+	FieldIndex int
+}
+
+func (s SettingsModal) visibleRows() []settingsRow {
+	seen := map[settingsSection]bool{}
+	var rows []settingsRow
+	for i, field := range s.Fields {
+		if !seen[field.Section] {
+			rows = append(rows, settingsRow{IsSection: true, Section: field.Section})
+			seen[field.Section] = true
+		}
+		if s.isExpanded(field.Section) {
+			rows = append(rows, settingsRow{Section: field.Section, FieldIndex: i})
+		}
+	}
+	return rows
+}
+
+func (s SettingsModal) currentRow() (settingsRow, bool) {
+	rows := s.visibleRows()
+	if s.Cursor < 0 || s.Cursor >= len(rows) {
+		return settingsRow{}, false
+	}
+	return rows[s.Cursor], true
+}
+
+func (s *SettingsModal) currentField() *settingsField {
+	row, ok := s.currentRow()
+	if !ok || row.IsSection || row.FieldIndex < 0 || row.FieldIndex >= len(s.Fields) {
+		return nil
+	}
+	return &s.Fields[row.FieldIndex]
+}
+
+func (s SettingsModal) isExpanded(section settingsSection) bool {
+	if s.Expanded == nil {
+		return false
+	}
+	return s.Expanded[section]
+}
+
+func (s *SettingsModal) setExpanded(section settingsSection, expanded bool) {
+	if s.Expanded == nil {
+		s.Expanded = map[settingsSection]bool{}
+	}
+	s.Expanded[section] = expanded
 }
 
 // View renders the settings modal.
@@ -280,24 +392,30 @@ func (s SettingsModal) View(termWidth, termHeight int) string {
 	allLines = append(allLines, headerStyle.Render("⚙  Settings"))
 	allLines = append(allLines, "")
 
-	lastSection := settingsSection(-1)
-	lineToField := map[int]int{} // track line->field mapping for scroll
-
-	for i, f := range s.Fields {
-		if f.Section != lastSection {
-			if lastSection >= 0 {
+	for rowIdx, row := range s.visibleRows() {
+		if row.IsSection {
+			if rowIdx > 0 {
 				allLines = append(allLines, "")
 			}
-			secIdx := int(f.Section)
+			secIdx := int(row.Section)
+			name := "SECTION"
 			if secIdx < len(sectionNames) {
-				allLines = append(allLines, sectionStyle.Render("  "+sectionNames[secIdx]))
+				name = sectionNames[secIdx]
 			}
-			lastSection = f.Section
+			icon := "▸"
+			if s.isExpanded(row.Section) {
+				icon = "▾"
+			}
+			style := sectionStyle
+			if rowIdx == s.Cursor {
+				style = activeLabel
+			}
+			allLines = append(allLines, style.Render(fmt.Sprintf("  %s %s", icon, name))+" "+sectionSummary(s, row.Section))
+			continue
 		}
+		f := s.Fields[row.FieldIndex]
 
-		lineToField[len(allLines)] = i
-
-		isActive := i == s.Cursor
+		isActive := rowIdx == s.Cursor
 		marker := "  "
 		lblStyle := normalLabel
 		if isActive {
@@ -357,7 +475,7 @@ func (s SettingsModal) View(termWidth, termHeight int) string {
 			}
 		}
 
-		allLines = append(allLines, label+" "+val)
+		allLines = append(allLines, "  "+label+" "+val)
 	}
 
 	allLines = append(allLines, "")
@@ -369,10 +487,14 @@ func (s SettingsModal) View(termWidth, termHeight int) string {
 	} else {
 		allLines = append(allLines,
 			hintKeyStyle.Render("↑/↓")+hintTextStyle.Render(" navigate  ")+
-				hintKeyStyle.Render("◀/▶")+hintTextStyle.Render(" choose  ")+
+				hintKeyStyle.Render("Enter/→")+hintTextStyle.Render(" expand  ")+
+				hintKeyStyle.Render("←")+hintTextStyle.Render(" collapse  "))
+		allLines = append(allLines,
+			hintKeyStyle.Render("◀/▶")+hintTextStyle.Render(" choose  ")+
 				hintTextStyle.Render("type to edit  "))
 		allLines = append(allLines,
-			hintKeyStyle.Render("Enter")+hintTextStyle.Render(" save all  ")+
+			hintKeyStyle.Render("Enter")+hintTextStyle.Render(" save field form  ")+
+				hintKeyStyle.Render("Ctrl+S")+hintTextStyle.Render(" save all  ")+
 				hintKeyStyle.Render("Esc")+hintTextStyle.Render(" close  ")+
 				hintKeyStyle.Render("Tab")+hintTextStyle.Render(" next field"))
 	}
@@ -439,4 +561,37 @@ func maskKey(key string) string {
 		return strings.Repeat("•", len(key))
 	}
 	return key[:3] + strings.Repeat("•", len(key)-6) + key[len(key)-3:]
+}
+
+func sectionSummary(s SettingsModal, section settingsSection) string {
+	style := lipgloss.NewStyle().Foreground(colorDim)
+	count := 0
+	preview := []string{}
+	for _, field := range s.Fields {
+		if field.Section != section {
+			continue
+		}
+		count++
+		if len(preview) >= 2 {
+			continue
+		}
+		value := field.Value
+		if field.Masked {
+			if value != "" {
+				value = "set"
+			} else if field.EnvVar != "" && os.Getenv(field.EnvVar) != "" {
+				value = "env"
+			} else {
+				value = "unset"
+			}
+		}
+		if value == "" {
+			value = "default"
+		}
+		preview = append(preview, field.DisplayName+"="+shorten(value, 18))
+	}
+	if len(preview) == 0 {
+		return style.Render(fmt.Sprintf("(%d fields)", count))
+	}
+	return style.Render(fmt.Sprintf("(%d fields · %s)", count, strings.Join(preview, " · ")))
 }

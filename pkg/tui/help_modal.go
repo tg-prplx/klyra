@@ -122,6 +122,10 @@ func (h HelpModal) View(termWidth, termHeight int) string {
 	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("Tab   "), cmdDescStyle.Render("Next field in settings / Autocomplete")))
 	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("F3    "), cmdDescStyle.Render("Toggle Context Debugger")))
 	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("F4    "), cmdDescStyle.Render("Toggle Model Reasoning (Thoughts)")))
+	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("F6    "), cmdDescStyle.Render("Toggle copy mode")))
+	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("F7    "), cmdDescStyle.Render("Cycle sidebar mode (files/diff/context)")))
+	allLines = append(allLines, fmt.Sprintf("  %s  %s", kbdStyle.Render("Alt+F7  "), cmdDescStyle.Render("Toggle sidebar visibility")))
+	allLines = append(allLines, fmt.Sprintf("  %s      %s", kbdStyle.Render("F8    "), cmdDescStyle.Render("Toggle sidebar position (left/right)")))
 
 	for i, cat := range h.Categories {
 		if i == 0 {

@@ -105,6 +105,68 @@ func TestAgentLoadsProjectInstructionsIntoSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestAgentInjectsContextCockpitFactCards(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{
+		responses: []llm.Response{{Content: "done"}},
+	}
+	agent, err := New(Config{
+		CWD:                   root,
+		Provider:              provider,
+		Output:                io.Discard,
+		ContextCockpitEnabled: true,
+		ContextCockpitInject:  true,
+		ContextCockpitTokens:  500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.RunConversation(context.Background(), nil, "inspect repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	system := provider.requests[0].Messages[0]
+	if !strings.Contains(system.Content, "Context cockpit fact cards") || !strings.Contains(system.Content, "Repo Map") {
+		t.Fatalf("cockpit was not injected into system prompt: %s", system.Content)
+	}
+	if !strings.Contains(result.ContextDebug.Cockpit, "Repo Map") || result.ContextDebug.CockpitTokens == 0 {
+		t.Fatalf("expected cockpit in context debug: %+v", result.ContextDebug)
+	}
+}
+
+func TestAgentInjectsScopedContextRecipes(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".agentcli", "recipes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".agentcli", "recipes", "migration-rules.md"), []byte("Use reversible migrations."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{
+		responses: []llm.Response{{Content: "done"}},
+	}
+	agent, err := New(Config{
+		CWD:            root,
+		Provider:       provider,
+		Output:         io.Discard,
+		ContextRecipes: true,
+		ContextFiles:   []string{"db/migrations/202605270001_add_users.sql"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.RunConversation(context.Background(), nil, "change migration"); err != nil {
+		t.Fatal(err)
+	}
+	system := provider.requests[0].Messages[0].Content
+	if !strings.Contains(system, "Context recipes selected for this task") || !strings.Contains(system, "Use reversible migrations.") {
+		t.Fatalf("scoped recipe was not injected: %s", system)
+	}
+}
+
 func TestAgentReplacesSavedSystemMessageWithCurrentPrompt(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Current repo rule."), 0o644); err != nil {

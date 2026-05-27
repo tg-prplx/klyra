@@ -196,6 +196,9 @@ func TestOpenAIProviderStreamsToolCalls(t *testing.T) {
 	if len(toolEvents) != 2 {
 		t.Fatalf("expected live tool call deltas, got %+v", toolEvents)
 	}
+	if toolEvents[0].ToolCallIndex != 0 || toolEvents[1].ToolCallIndex != 0 {
+		t.Fatalf("expected live tool call index to be preserved: %+v", toolEvents)
+	}
 	if toolEvents[0].ToolName != "read_file" || !strings.Contains(toolEvents[1].ToolArgumentsDelta, "main.go") {
 		t.Fatalf("unexpected live tool events: %+v", toolEvents)
 	}

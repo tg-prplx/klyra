@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"agentcli/pkg/cockpit"
 	contextmgr "agentcli/pkg/context"
 	"agentcli/pkg/instructions"
 	"agentcli/pkg/llm"
@@ -18,30 +19,37 @@ import (
 )
 
 type Config struct {
-	CWD              string
-	Model            string
-	ModelRoutes      router.ModelRoutes
-	MaxSteps         int
-	MaxMessages      int
-	MaxContext       int
-	MaxInstructions  int
-	MaxOutput        int
-	Reasoning        string
-	Store            bool
-	Stream           bool
-	ApprovalMode     string
-	Sandbox          string
-	Mode             string
-	ContextFiles     []string
-	Provider         llm.Provider
-	Tools            *tools.Registry
-	Input            io.Reader
-	Output           io.Writer
-	SystemMessage    string
-	Approver         ApprovalFunc
-	StreamHandler    llm.StreamHandler
-	ReasoningHandler func(string) error
-	ToolProgress     func(ToolProgressEvent) error
+	CWD                    string
+	Model                  string
+	ModelRoutes            router.ModelRoutes
+	MaxSteps               int
+	MaxMessages            int
+	MaxContext             int
+	MaxInstructions        int
+	MaxOutput              int
+	Reasoning              string
+	Store                  bool
+	Stream                 bool
+	ApprovalMode           string
+	Sandbox                string
+	Mode                   string
+	ContextFiles           []string
+	ContextCockpitEnabled  bool
+	ContextCockpitInject   bool
+	ContextCockpitTokens   int
+	ContextCockpitMaxFiles int
+	ContextCockpitDiff     bool
+	ContextRecipes         bool
+	NegativeContext        bool
+	Provider               llm.Provider
+	Tools                  *tools.Registry
+	Input                  io.Reader
+	Output                 io.Writer
+	SystemMessage          string
+	Approver               ApprovalFunc
+	StreamHandler          llm.StreamHandler
+	ReasoningHandler       func(string) error
+	ToolProgress           func(ToolProgressEvent) error
 }
 
 type ApprovalFunc func(ApprovalRequest) (bool, error)
@@ -74,10 +82,12 @@ type RunResult struct {
 }
 
 type ContextDebug struct {
-	Mode         string
-	ContextFiles []string
-	VisibleTools []string
-	Risks        []string
+	Mode          string
+	ContextFiles  []string
+	VisibleTools  []string
+	Risks         []string
+	Cockpit       string
+	CockpitTokens int
 }
 
 func New(cfg Config) (*Agent, error) {
@@ -116,6 +126,12 @@ func New(cfg Config) (*Agent, error) {
 	if cfg.MaxInstructions <= 0 {
 		cfg.MaxInstructions = instructions.DefaultMaxBytes
 	}
+	if cfg.ContextCockpitTokens <= 0 {
+		cfg.ContextCockpitTokens = cockpit.DefaultMaxTokens
+	}
+	if cfg.ContextCockpitMaxFiles <= 0 {
+		cfg.ContextCockpitMaxFiles = cockpit.DefaultMaxFiles
+	}
 	systemMessage := strings.TrimSpace(cfg.SystemMessage)
 	if systemMessage == "" {
 		systemMessage = defaultSystemMessage()
@@ -143,8 +159,28 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 		return RunResult{}, fmt.Errorf("task cannot be empty")
 	}
 
+	scopedInstructions, scopedErr := instructions.LoadScoped(a.cfg.CWD, task, a.cfg.ContextFiles, a.cfg.MaxInstructions/2)
+
+	cockpitSnapshot, cockpitErr := cockpit.Build(ctx, cockpit.Config{
+		Enabled:         a.cfg.ContextCockpitEnabled,
+		Inject:          a.cfg.ContextCockpitInject,
+		MaxTokens:       a.cfg.ContextCockpitTokens,
+		MaxFiles:        a.cfg.ContextCockpitMaxFiles,
+		IncludeDiff:     a.cfg.ContextCockpitDiff,
+		IncludeRecipes:  a.cfg.ContextRecipes,
+		IncludeNegative: a.cfg.NegativeContext,
+		MaxInstructions: a.cfg.MaxInstructions,
+	}, a.cfg.CWD, task, a.cfg.ContextFiles)
+	systemMessage := a.cfg.SystemMessage
+	if scopedErr == nil && a.cfg.ContextRecipes && strings.TrimSpace(scopedInstructions.Content) != "" {
+		systemMessage = withScopedInstructions(systemMessage, scopedInstructions)
+	}
+	if cockpitErr == nil && cockpitSnapshot.Enabled && cockpitSnapshot.Injected && len(cockpitSnapshot.Cards) > 0 {
+		systemMessage = strings.TrimSpace(systemMessage) + "\n\nContext cockpit fact cards. Treat this as a small, explainable context slice, not as the whole project:\n" + cockpitSnapshot.Markdown()
+	}
+
 	window := contextmgr.NewBudgetedWindow(a.cfg.MaxMessages, a.cfg.MaxContext)
-	window.Add(llm.Message{Role: llm.RoleSystem, Content: a.cfg.SystemMessage})
+	window.Add(llm.Message{Role: llm.RoleSystem, Content: systemMessage})
 	for _, message := range history {
 		if message.Role == llm.RoleSystem {
 			continue
@@ -163,6 +199,15 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	for step := 1; step <= a.cfg.MaxSteps; step++ {
 		specs := a.cfg.Tools.SpecsForTaskMode(task, a.cfg.Mode, a.cfg.ContextFiles)
 		lastDebug = a.contextDebug(specs)
+		if scopedErr != nil {
+			lastDebug.Risks = append(lastDebug.Risks, "scoped recipes failed: "+scopedErr.Error())
+		}
+		if cockpitErr != nil {
+			lastDebug.Risks = append(lastDebug.Risks, "context cockpit failed: "+cockpitErr.Error())
+		} else if cockpitSnapshot.Enabled {
+			lastDebug.Cockpit = cockpitSnapshot.Markdown()
+			lastDebug.CockpitTokens = cockpitSnapshot.EstimatedTokens
+		}
 		req := llm.Request{
 			Model:           router.SelectModel(a.cfg.Model, a.cfg.ModelRoutes, task),
 			Messages:        window.Messages(),
@@ -409,6 +454,7 @@ func defaultSystemMessage() string {
 Use tools to inspect the workspace before changing files.
 Prefer precise retrieval over reading entire large files.
 Start broad coding tasks with project_map, then use search/read_go_symbol/read_file slices.
+Keep stable context first for provider prompt caching: system rules, project rules, scoped recipes, repo map, then dynamic user request/diff/test errors.
 Use diff_patch for edits when possible and bash only when the command is necessary.
 Return concise progress and final summaries.
 Do not edit files outside the workspace.`)
@@ -424,6 +470,20 @@ func withProjectInstructions(base string, loaded instructions.Result) string {
 	builder.WriteString(strings.TrimSpace(loaded.Content))
 	if loaded.Truncated {
 		builder.WriteString("\n\nProject instructions were truncated to fit the configured instruction budget.")
+	}
+	return builder.String()
+}
+
+func withScopedInstructions(base string, loaded instructions.ScopedResult) string {
+	if strings.TrimSpace(loaded.Content) == "" {
+		return base
+	}
+	var builder strings.Builder
+	builder.WriteString(strings.TrimSpace(base))
+	builder.WriteString("\n\nContext recipes selected for this task. These scoped rules were matched by task text and workspace paths:\n")
+	builder.WriteString(strings.TrimSpace(loaded.Content))
+	if loaded.Truncated {
+		builder.WriteString("\n\nContext recipes were truncated to fit the configured instruction budget.")
 	}
 	return builder.String()
 }

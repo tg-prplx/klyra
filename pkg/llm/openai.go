@@ -496,6 +496,7 @@ func emitOpenAIStreamToolCallDeltas(deltas []openAIStreamToolCall, handler Strea
 			continue
 		}
 		if err := handler(StreamEvent{
+			ToolCallIndex:      delta.Index,
 			ToolCallID:         delta.ID,
 			ToolName:           delta.Function.Name,
 			ToolArgumentsDelta: delta.Function.Arguments,

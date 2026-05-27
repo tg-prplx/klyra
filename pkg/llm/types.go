@@ -73,6 +73,7 @@ type Provider interface {
 type StreamEvent struct {
 	Delta              string
 	Reasoning          string
+	ToolCallIndex      int
 	ToolCallID         string
 	ToolName           string
 	ToolArgumentsDelta string

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,6 +55,64 @@ func TestViewIncludesMetadata(t *testing.T) {
 	view := model.View()
 	if !strings.Contains(view, "mock") || !strings.Contains(view, "session s1") {
 		t.Fatalf("view missing metadata:\n%s", view)
+	}
+}
+
+func TestSidebarRendersFilesDiffAndContext(t *testing.T) {
+	model := New(Config{
+		SidebarFiles:    []string{"README.md", "pkg/tui/model.go"},
+		SidebarDiff:     "diff --git a/a b/a\n+added\n-removed",
+		CartCount:       2,
+		ContextCockpit:  true,
+		ContextRecipes:  true,
+		NegativeContext: true,
+	})
+	model.width = 120
+	model.height = 30
+	model.syncViewport(true)
+
+	view := stripANSI(model.View())
+	if !strings.Contains(view, "Klyra Sidebar") || !strings.Contains(view, "README.md") {
+		t.Fatalf("files sidebar missing:\n%s", view)
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF7})
+	m := updated.(Model)
+	view = stripANSI(m.View())
+	if !strings.Contains(view, "tracked diff") || !strings.Contains(view, "+added") {
+		t.Fatalf("diff sidebar missing:\n%s", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyF7})
+	m = updated.(Model)
+	view = stripANSI(m.View())
+	if !strings.Contains(view, "cart files: 2") || !strings.Contains(view, "cockpit: on") {
+		t.Fatalf("context sidebar missing:\n%s", view)
+	}
+}
+
+func TestSidebarCanBeHidden(t *testing.T) {
+	model := New(Config{SidebarFiles: []string{"README.md"}})
+	model.width = 120
+	model.height = 30
+	model.syncViewport(true)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF7, Alt: true})
+	m := updated.(Model)
+	view := stripANSI(m.View())
+	if strings.Contains(view, "Klyra Sidebar") {
+		t.Fatalf("sidebar should be hidden:\n%s", view)
+	}
+}
+
+func TestThinkingBarKeepsStableWidth(t *testing.T) {
+	model := New(Config{})
+	model.spinnerFrame = 0
+	first := stripANSI(model.renderThinkingBar())
+	model.spinnerFrame = 7
+	second := stripANSI(model.renderThinkingBar())
+	if len([]rune(first)) != len([]rune(second)) {
+		t.Fatalf("thinking bar width changed: %q (%d) vs %q (%d)", first, len([]rune(first)), second, len([]rune(second)))
+	}
+	if !strings.Contains(first, "thinking") || !strings.Contains(second, "thinking") {
+		t.Fatalf("thinking label missing: %q / %q", first, second)
 	}
 }
 
@@ -255,8 +314,10 @@ func TestSettingsModalAppliesFormWithoutSlashTyping(t *testing.T) {
 	if m.activeModal != modalSettings {
 		t.Fatal("expected settings modal to be open")
 	}
-	// Provider is the first field, cycle right to change it
+	// Provider section is collapsed by default: expand, move to field, then change it.
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRight})
 	// Press Enter to save
 	updated, cmd := updated.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd == nil {
@@ -270,6 +331,29 @@ func TestSettingsModalAppliesFormWithoutSlashTyping(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "openai") {
 		t.Fatalf("settings form did not update header:\n%s", view)
+	}
+}
+
+func TestSettingsModalSectionsCollapsedByDefault(t *testing.T) {
+	model := New(Config{Provider: "mock", Model: "mock-agent"})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	m := updated.(Model)
+	if m.settingsModal == nil {
+		t.Fatal("expected settings modal")
+	}
+	view := stripANSI(m.settingsModal.View(100, 40))
+	if !strings.Contains(view, "▸ PROVIDER") || !strings.Contains(view, "▸ CONTEXT") {
+		t.Fatalf("expected collapsed section rows:\n%s", view)
+	}
+	if strings.Contains(view, "Provider:") || strings.Contains(view, "Context Tokens:") {
+		t.Fatalf("fields should be hidden while sections are collapsed:\n%s", view)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	view = stripANSI(m.settingsModal.View(100, 40))
+	if !strings.Contains(view, "▾ PROVIDER") || !strings.Contains(view, "Provider:") {
+		t.Fatalf("provider section should expand:\n%s", view)
 	}
 }
 
@@ -695,6 +779,110 @@ func TestToolProgressRendersLive(t *testing.T) {
 	}
 }
 
+func TestToolStreamDeltasAggregateIntoOneCollapsedLine(t *testing.T) {
+	model := New(Config{})
+	updated, _ := model.Update(ToolStreamMsg{Index: 0, ID: "call-1", Name: "read_file", Arguments: "{\"path\""})
+	m := updated.(Model)
+	updated, _ = m.Update(ToolStreamMsg{Index: 0, Arguments: ":\"README.md\"}"})
+	m = updated.(Model)
+
+	count := 0
+	for _, line := range m.lines {
+		if strings.HasPrefix(line, "toolstream:") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one aggregated toolstream line, got %d: %#v", count, m.lines)
+	}
+	view := stripANSI(m.View())
+	if strings.Count(view, "model is preparing tool call") != 1 {
+		t.Fatalf("tool stream should render as one collapsed block:\n%s", view)
+	}
+	if strings.Contains(view, "│") {
+		t.Fatalf("tool stream details should be collapsed by default:\n%s", view)
+	}
+	if !strings.Contains(view, "README.md") {
+		t.Fatalf("tool stream summary should include compact args:\n%s", view)
+	}
+}
+
+func TestToolStreamFlushesCurrentAssistantSegment(t *testing.T) {
+	model := New(Config{})
+	model.busy = true
+
+	updated, _ := model.Update(ReasoningMsg("think before tool"))
+	m := updated.(Model)
+	updated, _ = m.Update(StreamMsg("I will inspect README."))
+	m = updated.(Model)
+	updated, _ = m.Update(ToolStreamMsg{Index: 0, ID: "call-1", Name: "read_file", Arguments: `{"path":"README.md"}`})
+	m = updated.(Model)
+
+	if m.reasoningText != "" || m.streamBuf != "" {
+		t.Fatalf("live assistant segment should be flushed before tool: reasoning=%q stream=%q", m.reasoningText, m.streamBuf)
+	}
+	thoughtIdx := lineIndex(m.lines, "thoughts:", "think before tool")
+	agentIdx := lineIndex(m.lines, "agent:", "I will inspect README.")
+	toolIdx := lineIndex(m.lines, "toolstream:", "README.md")
+	if thoughtIdx < 0 || agentIdx < 0 || toolIdx < 0 {
+		t.Fatalf("expected thoughts, answer, and toolstream lines: %#v", m.lines)
+	}
+	if !(thoughtIdx < agentIdx && agentIdx < toolIdx) {
+		t.Fatalf("expected thoughts -> answer -> tool order, got thoughts=%d agent=%d tool=%d lines=%#v", thoughtIdx, agentIdx, toolIdx, m.lines)
+	}
+
+	updated, _ = m.Update(ReasoningMsg("think after tool"))
+	m = updated.(Model)
+	updated, _ = m.Update(StreamMsg("Now I can explain."))
+	m = updated.(Model)
+	updated, _ = m.Update(responseMsg{input: "hello", output: "", agentRun: true})
+	m = updated.(Model)
+
+	secondThoughtIdx := lineIndexAfter(m.lines, toolIdx, "thoughts:", "think after tool")
+	secondAgentIdx := lineIndexAfter(m.lines, toolIdx, "agent:", "Now I can explain.")
+	if secondThoughtIdx < 0 || secondAgentIdx < 0 {
+		t.Fatalf("expected second assistant segment after tool: %#v", m.lines)
+	}
+	if !(toolIdx < secondThoughtIdx && secondThoughtIdx < secondAgentIdx) {
+		t.Fatalf("expected tool -> thoughts -> answer order, got tool=%d thoughts=%d agent=%d lines=%#v", toolIdx, secondThoughtIdx, secondAgentIdx, m.lines)
+	}
+}
+
+func TestMouseClickTogglesSpecificToolDuringRun(t *testing.T) {
+	model := New(Config{
+		InitialLines: []string{
+			`toolprogress:0:{"Phase":"done","Tool":"older_tool","Output":"old details"}`,
+			`toolprogress:0:{"Phase":"done","Tool":"newer_tool","Output":"new details"}`,
+		},
+	})
+	model.busy = true
+	model.streamBuf = "still streaming"
+	model.syncViewport(true)
+
+	clickY := -1
+	for i, line := range model.currentViewportLines() {
+		if strings.Contains(stripANSICodes(line), "older_tool") {
+			clickY = i - model.viewport.YOffset
+			break
+		}
+	}
+	if clickY < 0 {
+		t.Fatalf("older tool line not found:\n%s", model.View())
+	}
+
+	updated, cmd := model.Update(tea.MouseMsg{Type: tea.MouseLeft, Y: clickY})
+	m := updated.(Model)
+	if !isClearScreenCmd(cmd) {
+		t.Fatal("expected tool toggle to force a clean repaint")
+	}
+	if !strings.HasPrefix(m.lines[0], "toolprogress:1:") {
+		t.Fatalf("clicked tool should expand, lines=%#v", m.lines)
+	}
+	if !strings.HasPrefix(m.lines[1], "toolprogress:0:") {
+		t.Fatalf("unclicked latest tool should stay collapsed, lines=%#v", m.lines)
+	}
+}
+
 func modelLinesContain(lines []string, parts ...string) bool {
 	for _, line := range lines {
 		matched := true
@@ -709,6 +897,26 @@ func modelLinesContain(lines []string, parts ...string) bool {
 		}
 	}
 	return false
+}
+
+func lineIndex(lines []string, parts ...string) int {
+	return lineIndexAfter(lines, -1, parts...)
+}
+
+func lineIndexAfter(lines []string, start int, parts ...string) int {
+	for i := start + 1; i < len(lines); i++ {
+		matched := true
+		for _, part := range parts {
+			if !strings.Contains(lines[i], part) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestModelHistoryNavigation(t *testing.T) {
@@ -790,6 +998,130 @@ func TestMouseWheelScrollsChat(t *testing.T) {
 	m = updated.(Model)
 	if m.viewport.YOffset <= start-3 {
 		t.Fatalf("expected mouse wheel down to scroll chat down, got %d", m.viewport.YOffset)
+	}
+}
+
+func TestRawMouseEscapeDoesNotReachInput(t *testing.T) {
+	model := New(Config{})
+	updated, _ := model.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("[<65;14;34M[<65;14;34M"),
+	})
+	m := updated.(Model)
+	if m.input.Value() != "" {
+		t.Fatalf("raw mouse escape leaked into input: %q", m.input.Value())
+	}
+}
+
+func TestRawMouseEscapeFragmentsDoNotReachInput(t *testing.T) {
+	model := New(Config{})
+	updated, _ := model.Update(tea.MouseMsg{Type: tea.MouseWheelDown})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("[[[[[["),
+	})
+	m := updated.(Model)
+	if m.input.Value() != "" {
+		t.Fatalf("raw mouse escape fragment leaked into input: %q", m.input.Value())
+	}
+}
+
+func TestSplitMouseEscapeFragmentsDoNotFlickerIntoInput(t *testing.T) {
+	model := New(Config{})
+	updated, _ := model.Update(tea.MouseMsg{Type: tea.MouseWheelDown})
+	model = updated.(Model)
+	for i := 0; i < 6; i++ {
+		updated, _ = model.Update(tea.KeyMsg{
+			Type:  tea.KeyRunes,
+			Runes: []rune("["),
+		})
+		model = updated.(Model)
+		if model.input.Value() != "" {
+			t.Fatalf("split raw mouse escape fragment leaked into input at step %d: %q", i, model.input.Value())
+		}
+	}
+}
+
+func TestBracketInputWorksNormally(t *testing.T) {
+	model := New(Config{})
+	updated, _ := model.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("["),
+	})
+	m := updated.(Model)
+	if m.input.Value() != "[" {
+		t.Fatalf("expected normal bracket input to work, got %q", m.input.Value())
+	}
+}
+
+func TestCtrlCInterruptsBusyAgentWithoutQuitting(t *testing.T) {
+	called := false
+	model := New(Config{
+		Interrupt: func() bool {
+			called = true
+			return true
+		},
+	})
+	model.busy = true
+	model.streamBuf = "partial"
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m := updated.(Model)
+	if !called {
+		t.Fatal("expected interrupt callback")
+	}
+	if m.busy {
+		t.Fatal("expected busy state to stop after interrupt")
+	}
+	if !m.interrupted {
+		t.Fatal("expected interrupted state")
+	}
+	if !isClearScreenCmd(cmd) {
+		t.Fatal("expected interrupt to force a clean repaint")
+	}
+	if !modelLinesContain(m.lines, "interrupted", "current", "run") {
+		t.Fatalf("expected interrupt status line: %#v", m.lines)
+	}
+}
+
+func TestInterruptedResponseKeepsPartialStreamAndSuppressesCancelError(t *testing.T) {
+	model := New(Config{})
+	model.interrupted = true
+	model.streamBuf = "partial answer"
+	model.reasoningText = "thinking"
+
+	updated, _ := model.Update(responseMsg{
+		input:    "hello",
+		err:      context.Canceled,
+		agentRun: true,
+	})
+	m := updated.(Model)
+	if m.err != nil {
+		t.Fatalf("cancel error should be suppressed after interrupt: %v", m.err)
+	}
+	if m.interrupted {
+		t.Fatal("interrupted state should be cleared after canceled response")
+	}
+	if !modelLinesContain(m.lines, "agent:", "partial answer") {
+		t.Fatalf("partial stream should persist after interrupt: %#v", m.lines)
+	}
+	if modelLinesContain(m.lines, "error:", "context canceled") {
+		t.Fatalf("context canceled should not be rendered as an error: %#v", m.lines)
+	}
+}
+
+func TestMouseEscapeSanitizerKeepsNormalText(t *testing.T) {
+	cleaned := sanitizeMouseEscapes("hello[<65;14;34M world")
+	if cleaned != "hello world" {
+		t.Fatalf("unexpected sanitized value: %q", cleaned)
+	}
+}
+
+func TestMouseEscapeSanitizerDropsBracketBursts(t *testing.T) {
+	cleaned := sanitizeMouseEscapes("hello[[[[ world")
+	if cleaned != "hello world" {
+		t.Fatalf("unexpected sanitized value: %q", cleaned)
 	}
 }
 
@@ -897,7 +1229,7 @@ func TestModelAPIKeyPersistence(t *testing.T) {
 	}
 
 	// 3. Save settings
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	_ = executeCmd(cmd)
 
 	// 4. Verify environment variable is set

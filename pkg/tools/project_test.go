@@ -25,6 +25,24 @@ func (s *Server) Login(user string) error {
 }
 `)
 	writeTestFile(t, dir, "node_modules/ignored/index.js", "ignored\n")
+	writeTestFile(t, dir, "go.sum", "hash\n")
+	writeTestFile(t, dir, "web/app.min.js", "minified\n")
+	writeTestFile(t, dir, "web/component.tsx", `import React from "react";
+
+export interface Props {
+	name: string
+}
+
+export function UserCard(props: Props) {
+	return <section>{props.name}</section>
+}
+`)
+	writeTestFile(t, dir, "scripts/tasks.py", `import pathlib
+
+class Runner:
+    def run(self):
+        return pathlib.Path(".")
+`)
 
 	result, err := ProjectMap{}.Run(context.Background(), Invocation{
 		CWD:  dir,
@@ -39,8 +57,17 @@ func (s *Server) Login(user string) error {
 	if strings.Contains(result.Output, "node_modules") {
 		t.Fatalf("expected generated directories to be skipped:\n%s", result.Output)
 	}
-	if !strings.Contains(result.Output, "go_symbols:") || !strings.Contains(result.Output, "func Server.Login") {
+	if strings.Contains(result.Output, "go.sum") || strings.Contains(result.Output, "app.min.js") {
+		t.Fatalf("expected negative context files to be skipped:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "ast_symbols:") || !strings.Contains(result.Output, "method Login") {
 		t.Fatalf("expected Go symbols in project map:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "language=tsx") || !strings.Contains(result.Output, "UserCard") {
+		t.Fatalf("expected TSX tree-sitter symbols in project map:\n%s", result.Output)
+	}
+	if !strings.Contains(result.Output, "language=python") || !strings.Contains(result.Output, "Runner") {
+		t.Fatalf("expected Python tree-sitter symbols in project map:\n%s", result.Output)
 	}
 }
 

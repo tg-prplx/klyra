@@ -3,9 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,7 +25,7 @@ func (ProjectMap) Spec() llm.ToolSpec {
 	}
 }
 
-func (ProjectMap) Run(_ context.Context, inv Invocation) (Result, error) {
+func (ProjectMap) Run(ctx context.Context, inv Invocation) (Result, error) {
 	maxFiles, err := optionalIntArg(inv.Args, "max_files", 80)
 	if err != nil {
 		return Result{}, err
@@ -63,6 +60,9 @@ func (ProjectMap) Run(_ context.Context, inv Invocation) (Result, error) {
 		if err != nil {
 			return err
 		}
+		if shouldSkipContextPath(rel, info) {
+			return nil
+		}
 		files = append(files, rel)
 		ext := filepath.Ext(rel)
 		if ext == "" {
@@ -77,7 +77,7 @@ func (ProjectMap) Run(_ context.Context, inv Invocation) (Result, error) {
 
 	sort.Strings(files)
 	important := importantFiles(files, maxFiles, focus)
-	goSymbols := goSymbolSummaries(inv.CWD, important, focus)
+	astSymbols := astSymbolSummaries(ctx, inv.CWD, important, focus)
 	var out []string
 	out = append(out, fmt.Sprintf("root: %s", inv.CWD))
 	out = append(out, fmt.Sprintf("files: %d", len(files)))
@@ -93,13 +93,36 @@ func (ProjectMap) Run(_ context.Context, inv Invocation) (Result, error) {
 	for _, file := range important {
 		out = append(out, "- "+file)
 	}
-	if len(goSymbols) > 0 {
-		out = append(out, "go_symbols:")
-		for _, summary := range goSymbols {
+	if len(astSymbols) > 0 {
+		out = append(out, "ast_symbols:")
+		for _, summary := range astSymbols {
 			out = append(out, summary.lines()...)
 		}
 	}
 	return Result{Output: trimLinesToTokenBudget(out, maxTokens)}, nil
+}
+
+func shouldSkipContextPath(path string, info os.FileInfo) bool {
+	lower := strings.ToLower(filepath.ToSlash(path))
+	name := filepath.Base(lower)
+	switch name {
+	case "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "go.sum", "cargo.lock", "poetry.lock":
+		return true
+	}
+	if strings.HasSuffix(name, ".min.js") || strings.HasSuffix(name, ".min.css") || strings.HasSuffix(name, ".snap") {
+		return true
+	}
+	if strings.Contains(lower, "__snapshots__/") || strings.Contains(name, ".generated.") || strings.Contains(name, ".gen.") {
+		return true
+	}
+	switch filepath.Ext(name) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz", ".tar", ".mp4", ".mov", ".wasm":
+		return true
+	}
+	if info != nil && info.Size() > 256*1024 {
+		return true
+	}
+	return false
 }
 
 type countPair struct {
@@ -141,7 +164,7 @@ func importantFiles(files []string, limit int, focus string) []string {
 		if strings.Contains(name, "test") {
 			score += 8
 		}
-		if filepath.Ext(name) == ".go" || filepath.Ext(name) == ".rs" || filepath.Ext(name) == ".ts" || filepath.Ext(name) == ".py" {
+		if isCodeExtension(filepath.Ext(name)) {
 			score += 5
 		}
 		for _, term := range focusTerms {
@@ -164,145 +187,6 @@ func importantFiles(files []string, limit int, focus string) []string {
 		sorted = sorted[:limit]
 	}
 	return sorted
-}
-
-type goFileSummary struct {
-	Path    string
-	Package string
-	Imports []string
-	Symbols []string
-	Score   int
-}
-
-func goSymbolSummaries(root string, files []string, focus string) []goFileSummary {
-	focusTerms := queryTerms(focus)
-	var summaries []goFileSummary
-	for _, rel := range files {
-		if filepath.Ext(rel) != ".go" {
-			continue
-		}
-		summary, err := parseGoFileSummary(filepath.Join(root, rel), rel, focusTerms)
-		if err != nil || len(summary.Symbols) == 0 {
-			continue
-		}
-		summaries = append(summaries, summary)
-	}
-	sort.SliceStable(summaries, func(i, j int) bool {
-		if summaries[i].Score == summaries[j].Score {
-			return summaries[i].Path < summaries[j].Path
-		}
-		return summaries[i].Score > summaries[j].Score
-	})
-	if len(summaries) > 24 {
-		summaries = summaries[:24]
-	}
-	return summaries
-}
-
-func parseGoFileSummary(path, rel string, focusTerms []string) (goFileSummary, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		return goFileSummary{}, err
-	}
-	summary := goFileSummary{Path: filepath.ToSlash(rel), Package: file.Name.Name}
-	for _, imp := range file.Imports {
-		summary.Imports = append(summary.Imports, strings.Trim(imp.Path.Value, `"`))
-	}
-	for _, decl := range file.Decls {
-		switch decl := decl.(type) {
-		case *ast.FuncDecl:
-			name := decl.Name.Name
-			if decl.Recv != nil && len(decl.Recv.List) > 0 {
-				name = receiverName(decl.Recv.List[0].Type) + "." + name
-			}
-			summary.Symbols = append(summary.Symbols, "func "+name+signatureSummary(decl.Type))
-		case *ast.GenDecl:
-			for _, spec := range decl.Specs {
-				switch spec := spec.(type) {
-				case *ast.TypeSpec:
-					summary.Symbols = append(summary.Symbols, "type "+spec.Name.Name+" "+exprKind(spec.Type))
-				case *ast.ValueSpec:
-					for _, name := range spec.Names {
-						summary.Symbols = append(summary.Symbols, strings.ToLower(decl.Tok.String())+" "+name.Name)
-					}
-				}
-			}
-		}
-	}
-	if len(summary.Imports) > 6 {
-		summary.Imports = summary.Imports[:6]
-	}
-	if len(summary.Symbols) > 10 {
-		summary.Symbols = summary.Symbols[:10]
-	}
-	lower := strings.ToLower(summary.Path + " " + strings.Join(summary.Symbols, " ") + " " + strings.Join(summary.Imports, " "))
-	for _, term := range focusTerms {
-		if strings.Contains(lower, term) {
-			summary.Score += 10
-		}
-	}
-	return summary, nil
-}
-
-func (s goFileSummary) lines() []string {
-	header := fmt.Sprintf("- %s package=%s", s.Path, s.Package)
-	if len(s.Imports) > 0 {
-		header += " imports=" + strings.Join(s.Imports, ",")
-	}
-	lines := []string{header}
-	for _, symbol := range s.Symbols {
-		lines = append(lines, "  - "+symbol)
-	}
-	return lines
-}
-
-func receiverName(expr ast.Expr) string {
-	switch expr := expr.(type) {
-	case *ast.Ident:
-		return expr.Name
-	case *ast.StarExpr:
-		return receiverName(expr.X)
-	default:
-		return "recv"
-	}
-}
-
-func signatureSummary(fn *ast.FuncType) string {
-	params := fieldCount(fn.Params)
-	results := fieldCount(fn.Results)
-	if results == 0 {
-		return fmt.Sprintf("(%d params)", params)
-	}
-	return fmt.Sprintf("(%d params) -> %d", params, results)
-}
-
-func fieldCount(fields *ast.FieldList) int {
-	if fields == nil {
-		return 0
-	}
-	count := 0
-	for _, field := range fields.List {
-		if len(field.Names) == 0 {
-			count++
-			continue
-		}
-		count += len(field.Names)
-	}
-	return count
-}
-
-func exprKind(expr ast.Expr) string {
-	switch expr.(type) {
-	case *ast.StructType:
-		return "struct"
-	case *ast.InterfaceType:
-		return "interface"
-	case *ast.FuncType:
-		return "func"
-	default:
-		return "alias"
-	}
 }
 
 func queryTerms(query string) []string {

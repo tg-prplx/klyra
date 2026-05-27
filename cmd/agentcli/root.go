@@ -15,10 +15,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"agentcli/internal/version"
 	"agentcli/pkg/agent"
+	"agentcli/pkg/cockpit"
 	appconfig "agentcli/pkg/config"
 	contextmgr "agentcli/pkg/context"
 	"agentcli/pkg/instructions"
@@ -33,28 +35,38 @@ import (
 )
 
 type options struct {
-	cwd             string
-	configPath      string
-	profile         string
-	provider        string
-	model           string
-	baseURL         string
-	fastModel       string
-	editModel       string
-	deepModel       string
-	maxSteps        int
-	maxMessages     int
-	maxContext      int
-	maxInstructions int
-	maxOutput       int
-	reasoning       string
-	store           bool
-	stream          bool
-	approval        string
-	sandbox         string
-	mode            string
-	contextFiles    []string
-	sessionID       string
+	cwd                    string
+	configPath             string
+	profile                string
+	provider               string
+	model                  string
+	baseURL                string
+	fastModel              string
+	editModel              string
+	deepModel              string
+	maxSteps               int
+	maxMessages            int
+	maxContext             int
+	maxInstructions        int
+	maxOutput              int
+	reasoning              string
+	store                  bool
+	stream                 bool
+	approval               string
+	sandbox                string
+	mode                   string
+	contextFiles           []string
+	sessionID              string
+	contextCockpit         bool
+	noContextCockpit       bool
+	contextCockpitInject   bool
+	noContextCockpitInject bool
+	contextCockpitTokens   int
+	contextCockpitMaxFiles int
+	contextRecipes         bool
+	noContextRecipes       bool
+	negativeContext        bool
+	noNegativeContext      bool
 }
 
 func Execute() {
@@ -94,6 +106,16 @@ func newRootCommand() *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.mode, "mode", "", "agent mode: inspect, edit, repair, refactor")
 	root.PersistentFlags().StringSliceVar(&opts.contextFiles, "context-file", nil, "file allowed in edit/refactor context cart; repeatable")
 	root.PersistentFlags().StringVar(&opts.sessionID, "session", "", "session id for persistent conversations")
+	root.PersistentFlags().BoolVar(&opts.contextCockpit, "context-cockpit", false, "enable context cockpit fact cards")
+	root.PersistentFlags().BoolVar(&opts.noContextCockpit, "no-context-cockpit", false, "disable context cockpit fact cards")
+	root.PersistentFlags().BoolVar(&opts.contextCockpitInject, "context-cockpit-inject", false, "inject context cockpit fact cards into model context")
+	root.PersistentFlags().BoolVar(&opts.noContextCockpitInject, "no-context-cockpit-inject", false, "show context cockpit without injecting it into model context")
+	root.PersistentFlags().IntVar(&opts.contextCockpitTokens, "context-cockpit-tokens", 0, "context cockpit token budget")
+	root.PersistentFlags().IntVar(&opts.contextCockpitMaxFiles, "context-cockpit-files", 0, "maximum files ranked in context cockpit repo map")
+	root.PersistentFlags().BoolVar(&opts.contextRecipes, "context-recipes", false, "enable scoped context recipes")
+	root.PersistentFlags().BoolVar(&opts.noContextRecipes, "no-context-recipes", false, "disable scoped context recipes")
+	root.PersistentFlags().BoolVar(&opts.negativeContext, "negative-context", false, "enable negative context deny-list cards")
+	root.PersistentFlags().BoolVar(&opts.noNegativeContext, "no-negative-context", false, "disable negative context deny-list cards")
 
 	runCmd := &cobra.Command{
 		Use:   "run [task]",
@@ -109,24 +131,31 @@ func newRootCommand() *cobra.Command {
 				return err
 			}
 			runner, err := agent.New(agent.Config{
-				CWD:             opts.cwd,
-				Model:           model,
-				ModelRoutes:     runtimeCfg.ModelRoutes,
-				MaxSteps:        runtimeCfg.MaxSteps,
-				MaxMessages:     runtimeCfg.MaxMessages,
-				MaxContext:      runtimeCfg.MaxContext,
-				MaxInstructions: runtimeCfg.MaxInstructions,
-				MaxOutput:       runtimeCfg.MaxOutput,
-				Reasoning:       runtimeCfg.Reasoning,
-				Store:           runtimeCfg.StoreResponses,
-				Stream:          opts.stream,
-				ApprovalMode:    runtimeCfg.ApprovalMode,
-				Sandbox:         runtimeCfg.Sandbox,
-				Mode:            runtimeCfg.Mode,
-				ContextFiles:    runtimeCfg.ContextFiles,
-				Provider:        provider,
-				Input:           os.Stdin,
-				Output:          cmd.OutOrStdout(),
+				CWD:                    opts.cwd,
+				Model:                  model,
+				ModelRoutes:            runtimeCfg.ModelRoutes,
+				MaxSteps:               runtimeCfg.MaxSteps,
+				MaxMessages:            runtimeCfg.MaxMessages,
+				MaxContext:             runtimeCfg.MaxContext,
+				MaxInstructions:        runtimeCfg.MaxInstructions,
+				MaxOutput:              runtimeCfg.MaxOutput,
+				Reasoning:              runtimeCfg.Reasoning,
+				Store:                  runtimeCfg.StoreResponses,
+				Stream:                 opts.stream,
+				ApprovalMode:           runtimeCfg.ApprovalMode,
+				Sandbox:                runtimeCfg.Sandbox,
+				Mode:                   runtimeCfg.Mode,
+				ContextFiles:           runtimeCfg.ContextFiles,
+				ContextCockpitEnabled:  runtimeCfg.ContextCockpit,
+				ContextCockpitInject:   runtimeCfg.ContextCockpitInject,
+				ContextCockpitTokens:   runtimeCfg.ContextCockpitTokens,
+				ContextCockpitMaxFiles: runtimeCfg.ContextCockpitMaxFiles,
+				ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
+				ContextRecipes:         runtimeCfg.ContextRecipes,
+				NegativeContext:        runtimeCfg.NegativeContext,
+				Provider:               provider,
+				Input:                  os.Stdin,
+				Output:                 cmd.OutOrStdout(),
 			})
 			if err != nil {
 				return err
@@ -219,6 +248,7 @@ func newTUICommand(opts *options) *cobra.Command {
 				{Name: "/sandbox", Description: "Set sandbox: read-only/workspace-write/danger-full-access"},
 				{Name: "/mode", Description: "Set mode: inspect/edit/repair/refactor"},
 				{Name: "/cart", Description: "Show or add context cart files"},
+				{Name: "/context", Description: "Show context cockpit fact cards"},
 				{Name: "/attach", Description: "Attach an image to the next model request"},
 				{Name: "/attachments", Description: "Show pending image attachments"},
 				{Name: "/doctor", Description: "Check local runtime support"},
@@ -243,6 +273,11 @@ func newTUICommand(opts *options) *cobra.Command {
 			}
 
 			var p *tea.Program
+			type activeRun struct {
+				cancel context.CancelFunc
+			}
+			var activeMu sync.Mutex
+			var active *activeRun
 			pendingAttachments := []llm.Attachment{}
 
 			handler := func(input string) (string, error) {
@@ -265,7 +300,7 @@ func newTUICommand(opts *options) *cobra.Command {
 						if err := store.Save(saved); err != nil {
 							return "", err
 						}
-						return fmt.Sprintf("### Session Saved\n\n- ID: `%s`", saved.ID), nil
+						return fmt.Sprintf("Session Saved\n\n- ID: `%s`", saved.ID), nil
 					case "/session":
 						if len(args) < 2 {
 							return "usage: /session <id>", nil
@@ -282,7 +317,7 @@ func newTUICommand(opts *options) *cobra.Command {
 								Lines:     tuiLinesFromMessages(saved.Messages),
 							})
 						}
-						return fmt.Sprintf("### Session Switched\n\n- ID: `%s`\n- Messages: `%d`\n- Updated: `%s`",
+						return fmt.Sprintf("Session Switched\n\n- ID: `%s`\n- Messages: `%d`\n- Updated: `%s`",
 							saved.ID, len(saved.Messages), saved.UpdatedAt.Format("2006-01-02 15:04:05")), nil
 					case "/compact":
 						compacted, stats := contextmgr.CompactMessages(saved.Messages, runtimeCfg.MaxContext, runtimeCfg.MaxMessages/2)
@@ -290,7 +325,7 @@ func newTUICommand(opts *options) *cobra.Command {
 						if err := store.Save(saved); err != nil {
 							return "", err
 						}
-						return fmt.Sprintf("### Session Compacted\n\n- Messages: `%d` ➔ `%d`\n- Estimated tokens: `%d` ➔ `%d`",
+						return fmt.Sprintf("Session Compacted\n\n- Messages: `%d` ➔ `%d`\n- Estimated tokens: `%d` ➔ `%d`",
 							stats.OriginalMessages, stats.PackedMessages, stats.OriginalTokens, stats.PackedTokens), nil
 					case "/settings":
 						_ = runtimeCfg.Save(opts.configPath)
@@ -335,7 +370,7 @@ func newTUICommand(opts *options) *cobra.Command {
 						return formatSettingSaved("reasoning", runtimeCfg.Reasoning), nil
 					case "/limits":
 						if len(args) == 1 {
-							return "### Limits Usage\n\n`Format:` `/limits [context|output|steps|messages|instructions] <value>`\n\n*Example:* `/limits context 32000`", nil
+							return "Limits Usage\n\n`Format:` `/limits [context|output|steps|messages|instructions] <value>`\n\n*Example:* `/limits context 32000`", nil
 						}
 						if err := applyTUILimit(&runtimeCfg, args[1:]); err != nil {
 							return "", err
@@ -368,6 +403,8 @@ func newTUICommand(opts *options) *cobra.Command {
 							runtimeCfg.ContextFiles = append(runtimeCfg.ContextFiles, args[2:]...)
 						}
 						return formatContextCart(runtimeCfg.ContextFiles), nil
+					case "/context":
+						return formatContextCockpit(runtimeCfg, opts.cwd, strings.TrimSpace(strings.TrimPrefix(trimmed, "/context")))
 					case "/attach":
 						if len(args) < 2 {
 							return "usage: /attach path/to/image.png", nil
@@ -377,7 +414,7 @@ func newTUICommand(opts *options) *cobra.Command {
 							return "", err
 						}
 						pendingAttachments = append(pendingAttachments, attachment)
-						return fmt.Sprintf("### Image Attached\n\n- Name: `%s`\n- Type: `%s`\n- Size: `%d` bytes\n\n*Attachment will be sent with the next request.*", attachment.Name, attachment.MIMEType, len(attachment.Data)), nil
+						return fmt.Sprintf("Image Attached\n\n- Name: `%s`\n- Type: `%s`\n- Size: `%d` bytes\n\n*Attachment will be sent with the next request.*", attachment.Name, attachment.MIMEType, len(attachment.Data)), nil
 					case "/attachments":
 						return formatAttachments(pendingAttachments), nil
 					case "/diff":
@@ -412,25 +449,32 @@ func newTUICommand(opts *options) *cobra.Command {
 				var output strings.Builder
 				sawStream := false
 				runnerWithOutput, err := agent.New(agent.Config{
-					CWD:             opts.cwd,
-					Model:           model,
-					ModelRoutes:     runtimeCfg.ModelRoutes,
-					MaxSteps:        runtimeCfg.MaxSteps,
-					MaxMessages:     runtimeCfg.MaxMessages,
-					MaxContext:      runtimeCfg.MaxContext,
-					MaxInstructions: runtimeCfg.MaxInstructions,
-					MaxOutput:       runtimeCfg.MaxOutput,
-					Reasoning:       runtimeCfg.Reasoning,
-					Store:           runtimeCfg.StoreResponses,
-					Stream:          true,
-					ApprovalMode:    runtimeCfg.ApprovalMode,
-					Sandbox:         runtimeCfg.Sandbox,
-					Mode:            runtimeCfg.Mode,
-					ContextFiles:    runtimeCfg.ContextFiles,
-					Provider:        provider,
-					Input:           os.Stdin,
-					Output:          &output,
-					Approver:        newTUIApprover(&p),
+					CWD:                    opts.cwd,
+					Model:                  model,
+					ModelRoutes:            runtimeCfg.ModelRoutes,
+					MaxSteps:               runtimeCfg.MaxSteps,
+					MaxMessages:            runtimeCfg.MaxMessages,
+					MaxContext:             runtimeCfg.MaxContext,
+					MaxInstructions:        runtimeCfg.MaxInstructions,
+					MaxOutput:              runtimeCfg.MaxOutput,
+					Reasoning:              runtimeCfg.Reasoning,
+					Store:                  runtimeCfg.StoreResponses,
+					Stream:                 true,
+					ApprovalMode:           runtimeCfg.ApprovalMode,
+					Sandbox:                runtimeCfg.Sandbox,
+					Mode:                   runtimeCfg.Mode,
+					ContextFiles:           runtimeCfg.ContextFiles,
+					ContextCockpitEnabled:  runtimeCfg.ContextCockpit,
+					ContextCockpitInject:   runtimeCfg.ContextCockpitInject,
+					ContextCockpitTokens:   runtimeCfg.ContextCockpitTokens,
+					ContextCockpitMaxFiles: runtimeCfg.ContextCockpitMaxFiles,
+					ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
+					ContextRecipes:         runtimeCfg.ContextRecipes,
+					NegativeContext:        runtimeCfg.NegativeContext,
+					Provider:               provider,
+					Input:                  os.Stdin,
+					Output:                 &output,
+					Approver:               newTUIApprover(&p),
 					StreamHandler: func(event llm.StreamEvent) error {
 						if p == nil {
 							return nil
@@ -438,9 +482,10 @@ func newTUICommand(opts *options) *cobra.Command {
 						if event.ToolName != "" || event.ToolArgumentsDelta != "" {
 							sawStream = true
 							p.Send(tui.ToolStreamMsg{
-								ID:             event.ToolCallID,
-								Name:           event.ToolName,
-								ArgumentsDelta: event.ToolArgumentsDelta,
+								Index:     event.ToolCallIndex,
+								ID:        event.ToolCallID,
+								Name:      event.ToolName,
+								Arguments: event.ToolArgumentsDelta,
 							})
 						}
 						if event.Delta != "" {
@@ -477,7 +522,21 @@ func newTUICommand(opts *options) *cobra.Command {
 				}
 				attachments := pendingAttachments
 				pendingAttachments = nil
-				result, err := runnerWithOutput.RunConversationWithAttachments(context.Background(), saved.Messages, input, attachments)
+				runCtx, cancel := context.WithCancel(context.Background())
+				runState := &activeRun{cancel: cancel}
+				activeMu.Lock()
+				active = runState
+				activeMu.Unlock()
+				defer func() {
+					activeMu.Lock()
+					if active == runState {
+						active = nil
+					}
+					activeMu.Unlock()
+					cancel()
+				}()
+
+				result, err := runnerWithOutput.RunConversationWithAttachments(runCtx, saved.Messages, input, attachments)
 				saved.Messages = result.Messages
 				if saveErr := store.Save(saved); saveErr != nil {
 					return "", saveErr
@@ -494,26 +553,44 @@ func newTUICommand(opts *options) *cobra.Command {
 			}
 
 			tuiModel := tui.New(tui.Config{
-				CWD:             opts.cwd,
-				Title:           "Klyra",
-				SessionID:       saved.ID,
-				Provider:        runtimeCfg.Provider,
-				Model:           runtimeCfg.Model,
-				BaseURL:         providerBaseURL(runtimeCfg, runtimeCfg.Provider),
-				Reasoning:       runtimeCfg.Reasoning,
-				Sandbox:         runtimeCfg.Sandbox,
-				Approval:        runtimeCfg.ApprovalMode,
-				Mode:            runtimeCfg.Mode,
-				CartCount:       len(runtimeCfg.ContextFiles),
-				MaxContext:      runtimeCfg.MaxContext,
-				MaxOutput:       runtimeCfg.MaxOutput,
-				MaxSteps:        runtimeCfg.MaxSteps,
-				MaxMessages:     runtimeCfg.MaxMessages,
-				MaxInstructions: runtimeCfg.MaxInstructions,
-				FastModel:       runtimeCfg.ModelRoutes["fast"],
-				EditModel:       runtimeCfg.ModelRoutes["edit"],
-				DeepModel:       runtimeCfg.ModelRoutes["deep"],
-				Handler:         handler,
+				CWD:                    opts.cwd,
+				Title:                  "Klyra",
+				SessionID:              saved.ID,
+				Provider:               runtimeCfg.Provider,
+				Model:                  runtimeCfg.Model,
+				BaseURL:                providerBaseURL(runtimeCfg, runtimeCfg.Provider),
+				Reasoning:              runtimeCfg.Reasoning,
+				Sandbox:                runtimeCfg.Sandbox,
+				Approval:               runtimeCfg.ApprovalMode,
+				Mode:                   runtimeCfg.Mode,
+				StoreResponses:         runtimeCfg.StoreResponses,
+				CartCount:              len(runtimeCfg.ContextFiles),
+				MaxContext:             runtimeCfg.MaxContext,
+				MaxOutput:              runtimeCfg.MaxOutput,
+				MaxSteps:               runtimeCfg.MaxSteps,
+				MaxMessages:            runtimeCfg.MaxMessages,
+				MaxInstructions:        runtimeCfg.MaxInstructions,
+				ContextCockpit:         runtimeCfg.ContextCockpit,
+				ContextCockpitInject:   runtimeCfg.ContextCockpitInject,
+				ContextCockpitTokens:   runtimeCfg.ContextCockpitTokens,
+				ContextCockpitMaxFiles: runtimeCfg.ContextCockpitMaxFiles,
+				ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
+				ContextRecipes:         runtimeCfg.ContextRecipes,
+				NegativeContext:        runtimeCfg.NegativeContext,
+				FastModel:              runtimeCfg.ModelRoutes["fast"],
+				EditModel:              runtimeCfg.ModelRoutes["edit"],
+				DeepModel:              runtimeCfg.ModelRoutes["deep"],
+				Handler:                handler,
+				Interrupt: func() bool {
+					activeMu.Lock()
+					runState := active
+					activeMu.Unlock()
+					if runState == nil || runState.cancel == nil {
+						return false
+					}
+					runState.cancel()
+					return true
+				},
 				PickerProvider: func(field string) (tui.PickerModal, error) {
 					switch field {
 					case "session":
@@ -526,6 +603,8 @@ func newTUICommand(opts *options) *cobra.Command {
 				},
 				Commands:     tuiCommands,
 				InitialLines: tuiLinesFromMessages(saved.Messages),
+				SidebarFiles: tuiSidebarFiles(opts.cwd),
+				SidebarDiff:  tuiSidebarDiff(opts.cwd),
 			})
 			p = tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseCellMotion())
 			_, err = p.Run()
@@ -543,6 +622,33 @@ func tuiStatus(cwd string) (string, error) {
 		return "clean", nil
 	}
 	return status.Output, nil
+}
+
+func tuiSidebarFiles(cwd string) []string {
+	result, err := (tools.ListFiles{}).Run(context.Background(), tools.Invocation{CWD: cwd, Args: map[string]any{"max_files": 80}})
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, line := range strings.Split(result.Output, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			files = append(files, line)
+		}
+	}
+	return files
+}
+
+func tuiSidebarDiff(cwd string) string {
+	result, err := (tools.GitDiff{}).Run(context.Background(), tools.Invocation{CWD: cwd, Args: map[string]any{"max_lines": 120}})
+	if err != nil {
+		status, statusErr := (tools.GitStatus{}).Run(context.Background(), tools.Invocation{CWD: cwd, Args: map[string]any{}})
+		if statusErr == nil {
+			return status.Output
+		}
+		return ""
+	}
+	return result.Output
 }
 
 func tuiSessionPicker(store *session.Store, currentID string) (tui.PickerModal, error) {
@@ -630,13 +736,14 @@ func tuiLinesFromMessages(messages []llm.Message) []string {
 
 func formatTUISettings(cfg appconfig.Config, attachments []llm.Attachment) string {
 	var builder strings.Builder
-	builder.WriteString("## Settings\n\n")
+	builder.WriteString("Settings\n\n")
 	fmt.Fprintf(&builder, "- provider: `%s`\n", valueOrString(cfg.Provider, "mock"))
 	fmt.Fprintf(&builder, "- model: `%s`\n", valueOrString(cfg.Model, "provider env / routed"))
 	fmt.Fprintf(&builder, "- endpoint: `%s`\n", valueOrString(providerBaseURL(cfg, cfg.Provider), "provider default/env"))
 	fmt.Fprintf(&builder, "- reasoning: `%s`\n", valueOrString(cfg.Reasoning, "default"))
 	fmt.Fprintf(&builder, "- sandbox: `%s`\n", valueOrString(cfg.Sandbox, "workspace-write"))
 	fmt.Fprintf(&builder, "- mode: `%s`\n", valueOrString(cfg.Mode, "edit"))
+	fmt.Fprintf(&builder, "- provider store: `%s`\n", onOff(cfg.StoreResponses))
 	fmt.Fprintf(&builder, "- context cart: `%d files`\n", len(cfg.ContextFiles))
 	fmt.Fprintf(&builder, "- approval: `%s`\n", valueOrString(cfg.ApprovalMode, "auto"))
 	fmt.Fprintf(&builder, "- max context tokens: `%d`\n", cfg.MaxContext)
@@ -644,8 +751,14 @@ func formatTUISettings(cfg appconfig.Config, attachments []llm.Attachment) strin
 	fmt.Fprintf(&builder, "- max steps: `%d`\n", cfg.MaxSteps)
 	fmt.Fprintf(&builder, "- max messages: `%d`\n", cfg.MaxMessages)
 	fmt.Fprintf(&builder, "- max instruction bytes: `%d`\n", cfg.MaxInstructions)
+	fmt.Fprintf(&builder, "- context cockpit: `%s`\n", onOff(cfg.ContextCockpit))
+	fmt.Fprintf(&builder, "- cockpit inject: `%s`\n", onOff(cfg.ContextCockpitInject))
+	fmt.Fprintf(&builder, "- cockpit budget: `%d tokens / %d files`\n", cfg.ContextCockpitTokens, cfg.ContextCockpitMaxFiles)
+	fmt.Fprintf(&builder, "- cockpit diff: `%s`\n", onOff(cfg.ContextCockpitDiff))
+	fmt.Fprintf(&builder, "- context recipes: `%s`\n", onOff(cfg.ContextRecipes))
+	fmt.Fprintf(&builder, "- negative context: `%s`\n", onOff(cfg.NegativeContext))
 	fmt.Fprintf(&builder, "- pending images: `%d`\n", len(attachments))
-	builder.WriteString("\nUse `/provider`, `/model`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/mode`, `/cart add`, and `/attach` to change this without leaving Klyra.")
+	builder.WriteString("\nUse `/provider`, `/model`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/mode`, `/cart add`, `/context`, and `/attach` to change this without leaving Klyra.")
 	return builder.String()
 }
 
@@ -678,6 +791,12 @@ func applyTUISet(cfg *appconfig.Config, args []string) error {
 			cfg.Sandbox = value
 		case "mode":
 			cfg.Mode = value
+		case "store", "store_responses", "store-responses":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("store must be on/off")
+			}
+			cfg.StoreResponses = parsed
 		case "context":
 			parsed, err := strconv.Atoi(value)
 			if err != nil || parsed <= 0 {
@@ -690,6 +809,66 @@ func applyTUISet(cfg *appconfig.Config, args []string) error {
 				return fmt.Errorf("output must be a positive integer")
 			}
 			cfg.MaxOutput = parsed
+		case "steps":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("steps must be a positive integer")
+			}
+			cfg.MaxSteps = parsed
+		case "messages":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("messages must be a positive integer")
+			}
+			cfg.MaxMessages = parsed
+		case "instructions", "instruction_bytes", "instruction-bytes":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("instructions must be a positive integer")
+			}
+			cfg.MaxInstructions = parsed
+		case "context_cockpit", "cockpit":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("context_cockpit must be on/off")
+			}
+			cfg.ContextCockpit = parsed
+		case "context_cockpit_inject", "cockpit_inject":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("context_cockpit_inject must be on/off")
+			}
+			cfg.ContextCockpitInject = parsed
+		case "context_cockpit_diff", "cockpit_diff":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("context_cockpit_diff must be on/off")
+			}
+			cfg.ContextCockpitDiff = parsed
+		case "context_cockpit_tokens", "cockpit_tokens":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("context_cockpit_tokens must be a positive integer")
+			}
+			cfg.ContextCockpitTokens = parsed
+		case "context_cockpit_files", "cockpit_files":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 {
+				return fmt.Errorf("context_cockpit_files must be a positive integer")
+			}
+			cfg.ContextCockpitMaxFiles = parsed
+		case "context_recipes", "recipes":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("context_recipes must be on/off")
+			}
+			cfg.ContextRecipes = parsed
+		case "negative_context", "negative":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("negative_context must be on/off")
+			}
+			cfg.NegativeContext = parsed
 		default:
 			return fmt.Errorf("unknown setting %q", key)
 		}
@@ -699,14 +878,31 @@ func applyTUISet(cfg *appconfig.Config, args []string) error {
 
 func formatContextCart(files []string) string {
 	if len(files) == 0 {
-		return "### Context Cart\n\n*Cart is empty. Use `/cart add <file>` to attach files.*"
+		return "Context Cart\n\n*Cart is empty. Use `/cart add <file>` to attach files.*"
 	}
 	var builder strings.Builder
-	builder.WriteString("### Context Cart\n\n")
+	builder.WriteString("Context Cart\n\n")
 	for _, file := range files {
 		fmt.Fprintf(&builder, "- `%s`\n", file)
 	}
 	return builder.String()
+}
+
+func formatContextCockpit(cfg appconfig.Config, cwd, focus string) (string, error) {
+	snapshot, err := cockpit.Build(context.Background(), cockpit.Config{
+		Enabled:         cfg.ContextCockpit,
+		Inject:          cfg.ContextCockpitInject,
+		MaxTokens:       cfg.ContextCockpitTokens,
+		MaxFiles:        cfg.ContextCockpitMaxFiles,
+		IncludeDiff:     cfg.ContextCockpitDiff,
+		IncludeRecipes:  cfg.ContextRecipes,
+		IncludeNegative: cfg.NegativeContext,
+		MaxInstructions: cfg.MaxInstructions,
+	}, cwd, focus, cfg.ContextFiles)
+	if err != nil {
+		return "", err
+	}
+	return "Context Cockpit\n\n" + snapshot.Markdown(), nil
 }
 
 func printContextDebug(out io.Writer, debug agent.ContextDebug) {
@@ -721,7 +917,7 @@ func formatContextDebug(debug agent.ContextDebug) string {
 		return ""
 	}
 	var builder strings.Builder
-	builder.WriteString("## Context Debugger\n\n")
+	builder.WriteString("Context Debugger\n\n")
 	fmt.Fprintf(&builder, "- mode: `%s`\n", valueOrString(debug.Mode, "edit"))
 	if len(debug.ContextFiles) == 0 {
 		builder.WriteString("- context cart: empty\n")
@@ -739,6 +935,9 @@ func formatContextDebug(debug agent.ContextDebug) string {
 		for _, risk := range debug.Risks {
 			builder.WriteString("  - " + risk + "\n")
 		}
+	}
+	if strings.TrimSpace(debug.Cockpit) != "" {
+		fmt.Fprintf(&builder, "\nContext Cockpit\n\n- estimated tokens: `%d`\n\n%s\n", debug.CockpitTokens, debug.Cockpit)
 	}
 	return strings.TrimSpace(builder.String())
 }
@@ -795,10 +994,10 @@ func loadImageAttachment(cwd, path string) (llm.Attachment, error) {
 
 func formatAttachments(attachments []llm.Attachment) string {
 	if len(attachments) == 0 {
-		return "### Pending Attachments\n\n*No pending image attachments.*"
+		return "Pending Attachments\n\n*No pending image attachments.*"
 	}
 	var builder strings.Builder
-	builder.WriteString("### Pending Attachments\n\n")
+	builder.WriteString("Pending Attachments\n\n")
 	for i, attachment := range attachments {
 		fmt.Fprintf(&builder, "%d. `%s` (%s, `%d` bytes)\n", i+1, attachment.Name, attachment.MIMEType, len(attachment.Data))
 	}
@@ -810,6 +1009,24 @@ func valueOrString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func onOff(value bool) string {
+	if value {
+		return "on"
+	}
+	return "off"
+}
+
+func parseBoolSetting(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on", "enable", "enabled":
+		return true, nil
+	case "0", "false", "no", "off", "disable", "disabled":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid boolean value %q", value)
+	}
 }
 
 func joinNonEmpty(parts ...string) string {
@@ -1063,24 +1280,31 @@ func newChatCommand(opts *options) *cobra.Command {
 				return err
 			}
 			runner, err := agent.New(agent.Config{
-				CWD:             opts.cwd,
-				Model:           model,
-				ModelRoutes:     runtimeCfg.ModelRoutes,
-				MaxSteps:        runtimeCfg.MaxSteps,
-				MaxMessages:     runtimeCfg.MaxMessages,
-				MaxContext:      runtimeCfg.MaxContext,
-				MaxInstructions: runtimeCfg.MaxInstructions,
-				MaxOutput:       runtimeCfg.MaxOutput,
-				Reasoning:       runtimeCfg.Reasoning,
-				Store:           runtimeCfg.StoreResponses,
-				Stream:          opts.stream,
-				ApprovalMode:    runtimeCfg.ApprovalMode,
-				Sandbox:         runtimeCfg.Sandbox,
-				Mode:            runtimeCfg.Mode,
-				ContextFiles:    runtimeCfg.ContextFiles,
-				Provider:        provider,
-				Input:           os.Stdin,
-				Output:          cmd.OutOrStdout(),
+				CWD:                    opts.cwd,
+				Model:                  model,
+				ModelRoutes:            runtimeCfg.ModelRoutes,
+				MaxSteps:               runtimeCfg.MaxSteps,
+				MaxMessages:            runtimeCfg.MaxMessages,
+				MaxContext:             runtimeCfg.MaxContext,
+				MaxInstructions:        runtimeCfg.MaxInstructions,
+				MaxOutput:              runtimeCfg.MaxOutput,
+				Reasoning:              runtimeCfg.Reasoning,
+				Store:                  runtimeCfg.StoreResponses,
+				Stream:                 opts.stream,
+				ApprovalMode:           runtimeCfg.ApprovalMode,
+				Sandbox:                runtimeCfg.Sandbox,
+				Mode:                   runtimeCfg.Mode,
+				ContextFiles:           runtimeCfg.ContextFiles,
+				ContextCockpitEnabled:  runtimeCfg.ContextCockpit,
+				ContextCockpitInject:   runtimeCfg.ContextCockpitInject,
+				ContextCockpitTokens:   runtimeCfg.ContextCockpitTokens,
+				ContextCockpitMaxFiles: runtimeCfg.ContextCockpitMaxFiles,
+				ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
+				ContextRecipes:         runtimeCfg.ContextRecipes,
+				NegativeContext:        runtimeCfg.NegativeContext,
+				Provider:               provider,
+				Input:                  os.Stdin,
+				Output:                 cmd.OutOrStdout(),
 			})
 			if err != nil {
 				return err
@@ -1392,6 +1616,36 @@ func effectiveConfig(cmd *cobra.Command, opts options) (appconfig.Config, error)
 	}
 	if flags.Changed("context-file") {
 		cfg.ContextFiles = append([]string(nil), opts.contextFiles...)
+	}
+	if flags.Changed("context-cockpit") {
+		cfg.ContextCockpit = opts.contextCockpit
+	}
+	if flags.Changed("no-context-cockpit") {
+		cfg.ContextCockpit = !opts.noContextCockpit
+	}
+	if flags.Changed("context-cockpit-inject") {
+		cfg.ContextCockpitInject = opts.contextCockpitInject
+	}
+	if flags.Changed("no-context-cockpit-inject") {
+		cfg.ContextCockpitInject = !opts.noContextCockpitInject
+	}
+	if flags.Changed("context-cockpit-tokens") {
+		cfg.ContextCockpitTokens = opts.contextCockpitTokens
+	}
+	if flags.Changed("context-cockpit-files") {
+		cfg.ContextCockpitMaxFiles = opts.contextCockpitMaxFiles
+	}
+	if flags.Changed("context-recipes") {
+		cfg.ContextRecipes = opts.contextRecipes
+	}
+	if flags.Changed("no-context-recipes") {
+		cfg.ContextRecipes = !opts.noContextRecipes
+	}
+	if flags.Changed("negative-context") {
+		cfg.NegativeContext = opts.negativeContext
+	}
+	if flags.Changed("no-negative-context") {
+		cfg.NegativeContext = !opts.noNegativeContext
 	}
 	if flags.Changed("store") {
 		cfg.StoreResponses = opts.store

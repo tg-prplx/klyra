@@ -101,7 +101,7 @@ func (FileReader) Run(_ context.Context, inv Invocation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	maxLines, err := optionalIntArg(inv.Args, "max_lines", 240)
+	maxLines, err := optionalIntArg(inv.Args, "max_lines", 120)
 	if err != nil {
 		return Result{}, err
 	}

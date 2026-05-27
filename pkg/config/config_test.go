@@ -47,8 +47,46 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "mock" || cfg.MaxSteps == 0 || cfg.MaxContext == 0 {
+	if cfg.Provider != "mock" || cfg.MaxSteps == 0 || cfg.MaxContext == 0 || !cfg.ContextCockpit || !cfg.ContextCockpitInject || !cfg.ContextRecipes || !cfg.NegativeContext {
 		t.Fatalf("expected defaults, got %+v", cfg)
+	}
+}
+
+func TestLoadOldConfigDefaultsNewContextBooleansOn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"provider":"mock","model":"mock-agent"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ContextCockpit || !cfg.ContextCockpitInject || !cfg.ContextCockpitDiff || !cfg.ContextRecipes || !cfg.NegativeContext {
+		t.Fatalf("expected missing new context booleans to default on: %+v", cfg)
+	}
+}
+
+func TestWithProfileAppliesContextCockpitOverrides(t *testing.T) {
+	cfg := Default()
+	disabled := false
+	cfg.Profiles["small"] = Profile{
+		ContextCockpit:         &disabled,
+		ContextCockpitInject:   &disabled,
+		ContextCockpitTokens:   700,
+		ContextCockpitMaxFiles: 25,
+		ContextCockpitDiff:     &disabled,
+		ContextRecipes:         &disabled,
+		NegativeContext:        &disabled,
+	}
+	got, err := cfg.WithProfile("small")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ContextCockpit || got.ContextCockpitInject || got.ContextCockpitDiff || got.ContextRecipes || got.NegativeContext {
+		t.Fatalf("expected cockpit booleans disabled: %+v", got)
+	}
+	if got.ContextCockpitTokens != 700 || got.ContextCockpitMaxFiles != 25 {
+		t.Fatalf("expected cockpit budgets applied: %+v", got)
 	}
 }
 
