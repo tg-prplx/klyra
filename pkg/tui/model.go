@@ -2218,10 +2218,10 @@ func (m Model) renderStatsLine(line string) []string {
 	timeStyle := lipgloss.NewStyle().Foreground(colorDim)
 	sepStyle := lipgloss.NewStyle().Foreground(colorMuted)
 
-	timeStr := timeStyle.Render(fmt.Sprintf("⚡ %s", durationVal))
+	timeStr := timeStyle.Render(durationVal)
 	sep := sepStyle.Render("  •  ")
 
-	ctxText := fmt.Sprintf("📊 %s ctx tokens", formatWithCommas(inputVal))
+	ctxText := fmt.Sprintf("%s ctx tokens", formatWithCommas(inputVal))
 	if cachedVal > 0 {
 		ctxText += fmt.Sprintf(" (%s cached)", formatWithCommas(cachedVal))
 	}
@@ -2229,7 +2229,7 @@ func (m Model) renderStatsLine(line string) []string {
 
 	var outBadge string
 	if outputVal > 0 {
-		outText := fmt.Sprintf("✍️ %s out tokens", formatWithCommas(outputVal))
+		outText := fmt.Sprintf("%s out tokens", formatWithCommas(outputVal))
 		if reasoningVal > 0 {
 			outText += fmt.Sprintf(" (%s reasoning)", formatWithCommas(reasoningVal))
 		}
