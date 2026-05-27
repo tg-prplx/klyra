@@ -87,7 +87,7 @@ func Default() Config {
 			"ollama": {
 				Provider:     "ollama",
 				MaxSteps:     20,
-				MaxContext:   32000,
+				MaxContext:   16000,
 				MaxOutput:    4096,
 				ApprovalMode: "ask",
 				Sandbox:      "workspace-write",
