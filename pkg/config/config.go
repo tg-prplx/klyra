@@ -30,6 +30,7 @@ type Config struct {
 	ContextCockpitDiff     bool               `json:"context_cockpit_diff"`
 	ContextRecipes         bool               `json:"context_recipes"`
 	NegativeContext        bool               `json:"negative_context"`
+	Skills                 bool               `json:"skills"`
 	StoreResponses         bool               `json:"store_responses"`
 	Profiles               map[string]Profile `json:"profiles,omitempty"`
 }
@@ -56,6 +57,7 @@ type Profile struct {
 	ContextCockpitDiff     *bool             `json:"context_cockpit_diff,omitempty"`
 	ContextRecipes         *bool             `json:"context_recipes,omitempty"`
 	NegativeContext        *bool             `json:"negative_context,omitempty"`
+	Skills                 *bool             `json:"skills,omitempty"`
 	StoreResponses         *bool             `json:"store_responses,omitempty"`
 }
 
@@ -79,6 +81,7 @@ func Default() Config {
 		ContextCockpitDiff:     true,
 		ContextRecipes:         true,
 		NegativeContext:        true,
+		Skills:                 true,
 		Profiles: map[string]Profile{
 			"local": {
 				Provider: "mock",
@@ -166,6 +169,9 @@ func Load(path string) (Config, error) {
 	}
 	if !strings.Contains(raw, `"negative_context"`) {
 		cfg.NegativeContext = defaults.NegativeContext
+	}
+	if !strings.Contains(raw, `"skills"`) {
+		cfg.Skills = defaults.Skills
 	}
 	cfg.applyDefaults()
 	return cfg, nil
@@ -282,6 +288,9 @@ func (c Config) WithProfile(name string) (Config, error) {
 	}
 	if profile.NegativeContext != nil {
 		c.NegativeContext = *profile.NegativeContext
+	}
+	if profile.Skills != nil {
+		c.Skills = *profile.Skills
 	}
 	if profile.StoreResponses != nil {
 		c.StoreResponses = *profile.StoreResponses

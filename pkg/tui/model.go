@@ -141,6 +141,7 @@ type Config struct {
 	ContextCockpitDiff     bool
 	ContextRecipes         bool
 	NegativeContext        bool
+	Skills                 bool
 	FastModel              string
 	EditModel              string
 	DeepModel              string
@@ -188,6 +189,7 @@ type Model struct {
 	contextCockpitDiff     bool
 	contextRecipes         bool
 	negativeContext        bool
+	skills                 bool
 	fastModel              string
 	editModel              string
 	deepModel              string
@@ -303,6 +305,7 @@ func New(cfg Config) Model {
 		contextCockpitDiff:     cfg.ContextCockpitDiff,
 		contextRecipes:         cfg.ContextRecipes,
 		negativeContext:        cfg.NegativeContext,
+		skills:                 cfg.Skills,
 		fastModel:              cfg.FastModel,
 		editModel:              cfg.EditModel,
 		deepModel:              cfg.DeepModel,
@@ -1187,6 +1190,7 @@ func (m Model) sidebarContextLines(width int) []string {
 		"  cockpit: " + onOff(m.contextCockpit),
 		"  recipes: " + onOff(m.contextRecipes),
 		"  negative: " + onOff(m.negativeContext),
+		"  skills: " + onOff(m.skills),
 		"  budget: " + formatNumber(m.contextCockpitTokens) + " / " + fmt.Sprintf("%d files", m.contextCockpitMaxFiles),
 		"",
 		lipgloss.NewStyle().Foreground(colorMuted).Render("runtime"),
@@ -1202,6 +1206,7 @@ func (m Model) sidebarContextLines(width int) []string {
 	}
 	return lines
 }
+
 // ---------------------------------------------------------------------------
 // Sidebar helpers: icons, mouse, scroll
 // ---------------------------------------------------------------------------
@@ -1564,7 +1569,7 @@ func (m *Model) openSettingsModal() {
 		m.maxContext, m.maxOutput, m.maxSteps, m.maxMessages, m.maxInstructions,
 		m.contextCockpit, m.contextCockpitInject,
 		m.contextCockpitTokens, m.contextCockpitMaxFiles, m.contextCockpitDiff,
-		m.contextRecipes, m.negativeContext,
+		m.contextRecipes, m.negativeContext, m.skills,
 		m.fastModel, m.editModel, m.deepModel,
 	)
 	m.settingsModal = &sm
@@ -1784,6 +1789,7 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.contextCockpitDiff = sm.GetValue("context_cockpit_diff") != "off"
 		m.contextRecipes = sm.GetValue("context_recipes") != "off"
 		m.negativeContext = sm.GetValue("negative_context") != "off"
+		m.skills = sm.GetValue("skills") != "off"
 		m.fastModel = sm.GetValue("fast_model")
 		m.editModel = sm.GetValue("edit_model")
 		m.deepModel = sm.GetValue("deep_model")
@@ -1814,6 +1820,7 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			"context_cockpit_diff="+onOff(m.contextCockpitDiff),
 			"context_recipes="+onOff(m.contextRecipes),
 			"negative_context="+onOff(m.negativeContext),
+			"skills="+onOff(m.skills),
 		)
 		cmdText := strings.Join(parts, " ")
 
@@ -2144,6 +2151,8 @@ func (m *Model) applyOptimisticCommand(value string) {
 				m.contextRecipes = value != "off"
 			case "negative_context":
 				m.negativeContext = value != "off"
+			case "skills":
+				m.skills = value != "off"
 			}
 		}
 	case "/provider":

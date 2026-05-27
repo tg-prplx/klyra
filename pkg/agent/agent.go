@@ -15,6 +15,7 @@ import (
 	"klyra/pkg/llm"
 	"klyra/pkg/policy"
 	"klyra/pkg/router"
+	"klyra/pkg/skills"
 	"klyra/pkg/tools"
 )
 
@@ -41,6 +42,7 @@ type Config struct {
 	ContextCockpitDiff     bool
 	ContextRecipes         bool
 	NegativeContext        bool
+	Skills                 bool
 	Provider               llm.Provider
 	Tools                  *tools.Registry
 	Input                  io.Reader
@@ -160,6 +162,11 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	}
 
 	scopedInstructions, scopedErr := instructions.LoadScoped(a.cfg.CWD, task, a.cfg.ContextFiles, a.cfg.MaxInstructions/2)
+	var skillSet skills.Result
+	var skillErr error
+	if a.cfg.Skills {
+		skillSet, skillErr = skills.Load(a.cfg.CWD, task, a.cfg.ContextFiles, a.cfg.MaxInstructions/2)
+	}
 
 	cockpitSnapshot, cockpitErr := cockpit.Build(ctx, cockpit.Config{
 		Enabled:         a.cfg.ContextCockpitEnabled,
@@ -174,6 +181,9 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	systemMessage := a.cfg.SystemMessage
 	if scopedErr == nil && a.cfg.ContextRecipes && strings.TrimSpace(scopedInstructions.Content) != "" {
 		systemMessage = withScopedInstructions(systemMessage, scopedInstructions)
+	}
+	if skillErr == nil && a.cfg.Skills && strings.TrimSpace(skillSet.Content) != "" {
+		systemMessage = withSkills(systemMessage, skillSet)
 	}
 	if cockpitErr == nil && cockpitSnapshot.Enabled && cockpitSnapshot.Injected && len(cockpitSnapshot.Cards) > 0 {
 		systemMessage = strings.TrimSpace(systemMessage) + "\n\nContext cockpit fact cards. Use these as a compact starting slice, then verify with tools:\n" + cockpitSnapshot.PromptText()
@@ -201,6 +211,9 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 		lastDebug = a.contextDebug(specs)
 		if scopedErr != nil {
 			lastDebug.Risks = append(lastDebug.Risks, "scoped recipes failed: "+scopedErr.Error())
+		}
+		if skillErr != nil {
+			lastDebug.Risks = append(lastDebug.Risks, "skills failed: "+skillErr.Error())
 		}
 		if cockpitErr != nil {
 			lastDebug.Risks = append(lastDebug.Risks, "context cockpit failed: "+cockpitErr.Error())
@@ -486,6 +499,20 @@ func withScopedInstructions(base string, loaded instructions.ScopedResult) strin
 	builder.WriteString(strings.TrimSpace(loaded.Content))
 	if loaded.Truncated {
 		builder.WriteString("\n\nSome scoped rules were truncated by the configured budget.")
+	}
+	return builder.String()
+}
+
+func withSkills(base string, loaded skills.Result) string {
+	if strings.TrimSpace(loaded.Content) == "" {
+		return base
+	}
+	var builder strings.Builder
+	builder.WriteString(strings.TrimSpace(base))
+	builder.WriteString("\n\nSkills matched for this task. Use them as operational guidance, below direct user and project rules:\n")
+	builder.WriteString(strings.TrimSpace(loaded.Content))
+	if loaded.Truncated {
+		builder.WriteString("\n\nSome skills were truncated by the configured budget.")
 	}
 	return builder.String()
 }

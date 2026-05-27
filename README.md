@@ -89,6 +89,8 @@ go run . doctor
 go run . tools
 go run . instructions
 go run . instructions --content
+go run . skills --all
+go run . skills --query "frontend css" --content
 go run . status --diff
 go run . checkpoint create before-refactor
 go run . checkpoint list
@@ -111,7 +113,7 @@ go run . --session feature-work run "continue the refactor"
 Sessions are stored under `.agentcli/sessions` in the workspace and are ignored by git.
 Inside chat, `/compact` rewrites older history into a compact deterministic summary so future turns spend fewer context tokens.
 
-The Klyra Bubble Tea TUI is intended as the primary work surface. It supports `/help`, `/status`, `/settings`, `/provider`, `/model`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/attach`, `/attachments`, `/instructions`, `/compact`, `/clear`, and `/exit`.
+The Klyra Bubble Tea TUI is intended as the primary work surface. It supports `/help`, `/status`, `/settings`, `/provider`, `/model`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/attach`, `/attachments`, `/instructions`, `/skills`, `/compact`, `/clear`, and `/exit`.
 
 Press `F2` or `Ctrl+S` to open the settings panel. Use `Tab` to move between fields, left/right arrows to choose provider/reasoning/approval/sandbox values, type directly into text fields such as model or endpoint, then press `Enter` to apply the runtime settings.
 
@@ -173,6 +175,31 @@ Agent CLI automatically loads common repository instruction files into the syste
 - `.cursor/rules/*.md`
 
 Use `go run . instructions --content` to inspect exactly what the agent will see.
+
+## Skills
+
+Skills are small task-specific markdown playbooks. Klyra auto-matches them by task text and context-cart paths, then injects only matched skills into the system prompt.
+
+Supported locations:
+
+- `.klyra/skills/*.md`
+- `.klyra/skills/*/SKILL.md`
+- `.agentcli/skills/*.md`
+- `.agentcli/skills/*/SKILL.md`
+- `skills/*.md`
+- `skills/*/SKILL.md`
+
+Optional metadata:
+
+```md
+name: Frontend Cleanup
+description: CSS and UI cleanup rules
+triggers: frontend, css, style
+
+Use focused edits and avoid glassmorphism.
+```
+
+Use `go run . skills --all` to list skills, or `go run . skills --query "migration sql" --content` to inspect matches. Disable injection with `--no-skills` or `skills=off` in TUI settings.
 
 ## Approval policy
 

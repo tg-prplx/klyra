@@ -57,7 +57,7 @@ func NewSettingsModal(
 	contextCockpit, contextCockpitInject bool,
 	contextCockpitTokens, contextCockpitMaxFiles int,
 	contextCockpitDiff bool,
-	contextRecipes, negativeContext bool,
+	contextRecipes, negativeContext, skills bool,
 	fastModel, editModel, deepModel string,
 ) SettingsModal {
 	fields := []settingsField{
@@ -93,6 +93,7 @@ func NewSettingsModal(
 		{Section: secContext, Name: "context_cockpit_diff", DisplayName: "Include Diff", Value: onOff(contextCockpitDiff), Choices: []string{"on", "off"}},
 		{Section: secContext, Name: "context_recipes", DisplayName: "Scoped Recipes", Value: onOff(contextRecipes), Choices: []string{"on", "off"}},
 		{Section: secContext, Name: "negative_context", DisplayName: "Negative Context", Value: onOff(negativeContext), Choices: []string{"on", "off"}},
+		{Section: secContext, Name: "skills", DisplayName: "Skills", Value: onOff(skills), Choices: []string{"on", "off"}},
 
 		// Routing section
 		{Section: secRouting, Name: "fast_model", DisplayName: "Fast Model", Value: fastModel},

@@ -2,27 +2,18 @@ package llm
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"sort"
 	"strings"
-	"time"
 )
 
 type OpenAIProvider struct {
-	apiKey            string
-	baseURL           string
-	client            *http.Client
+	transport         openAIChatTransport
 	omitStreamOptions bool
-	retryTransient    bool
 }
 
 func NewOpenAIProvider(apiKey, baseURL string) (*OpenAIProvider, error) {
@@ -32,11 +23,8 @@ func NewOpenAIProvider(apiKey, baseURL string) (*OpenAIProvider, error) {
 	isLocal := isLocalOpenAICompatibleBaseURL(baseURL) && !strings.Contains(strings.ToLower(baseURL), "test-stream-options")
 
 	return &OpenAIProvider{
-		apiKey:            apiKey,
-		baseURL:           strings.TrimRight(baseURL, "/"),
-		client:            &http.Client{Timeout: 0},
+		transport:         newOpenAIChatTransport(apiKey, baseURL, isLocal),
 		omitStreamOptions: isLocal,
-		retryTransient:    isLocal,
 	}, nil
 }
 
@@ -65,29 +53,9 @@ func (p *OpenAIProvider) Complete(ctx context.Context, req Request) (Response, e
 		return Response{}, err
 	}
 
-	var httpResp *http.Response
-	for attempt := 1; attempt <= p.maxAttempts(); attempt++ {
-		httpResp, err = p.doChatRequest(ctx, body, false)
-		if err != nil {
-			if p.shouldRetry(ctx, attempt, err) {
-				if waitErr := sleepBeforeOpenAIRetry(ctx, attempt); waitErr != nil {
-					return Response{}, waitErr
-				}
-				continue
-			}
-			return Response{}, formatOpenAITransportError(p.baseURL, err)
-		}
-		if isRetryableOpenAIStatus(httpResp.StatusCode) && attempt < p.maxAttempts() {
-			drainAndClose(httpResp.Body)
-			if waitErr := sleepBeforeOpenAIRetry(ctx, attempt); waitErr != nil {
-				return Response{}, waitErr
-			}
-			continue
-		}
-		break
-	}
-	if httpResp == nil {
-		return Response{}, formatOpenAITransportError(p.baseURL, err)
+	httpResp, err := p.transport.doChat(ctx, body, false)
+	if err != nil {
+		return Response{}, err
 	}
 	defer httpResp.Body.Close()
 
@@ -146,21 +114,21 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req Request, handler Stream
 		return Response{}, err
 	}
 
-	for attempt := 1; attempt <= p.maxAttempts(); attempt++ {
-		httpResp, err := p.doChatRequest(ctx, body, true)
+	for attempt := 1; attempt <= p.transport.retry.MaxAttempts; attempt++ {
+		httpResp, err := p.transport.sendChat(ctx, body, true)
 		if err != nil {
-			if p.shouldRetry(ctx, attempt, err) {
-				if waitErr := sleepBeforeOpenAIRetry(ctx, attempt); waitErr != nil {
+			if p.transport.shouldRetry(ctx, attempt, err) {
+				if waitErr := p.transport.sleepBeforeRetry(ctx, attempt); waitErr != nil {
 					return Response{}, waitErr
 				}
 				continue
 			}
-			return Response{}, formatOpenAITransportError(p.baseURL, err)
+			return Response{}, p.transport.formatTransportError(err)
 		}
 
-		if isRetryableOpenAIStatus(httpResp.StatusCode) && attempt < p.maxAttempts() {
+		if isRetryableOpenAIStatus(httpResp.StatusCode) && attempt < p.transport.retry.MaxAttempts {
 			drainAndClose(httpResp.Body)
-			if waitErr := sleepBeforeOpenAIRetry(ctx, attempt); waitErr != nil {
+			if waitErr := p.transport.sleepBeforeRetry(ctx, attempt); waitErr != nil {
 				return Response{}, waitErr
 			}
 			continue
@@ -185,49 +153,17 @@ func (p *OpenAIProvider) Stream(ctx context.Context, req Request, handler Stream
 		})
 		_ = httpResp.Body.Close()
 		if readErr != nil {
-			if !emitted && p.shouldRetry(ctx, attempt, readErr) {
-				if waitErr := sleepBeforeOpenAIRetry(ctx, attempt); waitErr != nil {
+			if !emitted && p.transport.shouldRetry(ctx, attempt, readErr) {
+				if waitErr := p.transport.sleepBeforeRetry(ctx, attempt); waitErr != nil {
 					return Response{}, waitErr
 				}
 				continue
 			}
-			return resp, formatOpenAITransportError(p.baseURL, readErr)
+			return resp, p.transport.formatTransportError(readErr)
 		}
 		return resp, nil
 	}
 	return Response{}, fmt.Errorf("openai-compatible API request failed after retries")
-}
-
-func (p *OpenAIProvider) doChatRequest(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(p.apiKey) != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if stream {
-		httpReq.Header.Set("Accept", "text/event-stream")
-	}
-	return p.client.Do(httpReq)
-}
-
-func (p *OpenAIProvider) maxAttempts() int {
-	if p.retryTransient {
-		return 3
-	}
-	return 1
-}
-
-func (p *OpenAIProvider) shouldRetry(ctx context.Context, attempt int, err error) bool {
-	if attempt >= p.maxAttempts() || err == nil {
-		return false
-	}
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	return isTransientOpenAIError(err)
 }
 
 func openAIContentString(content any) string {
@@ -249,86 +185,6 @@ func openAIContentString(content any) string {
 	default:
 		return ""
 	}
-}
-
-func isLocalOpenAICompatibleBaseURL(raw string) bool {
-	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "localhost") || strings.Contains(lower, "ollama") || strings.Contains(lower, "local") {
-		return true
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	host := parsed.Hostname()
-	if host == "" {
-		return false
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-		return true
-	}
-	return false
-}
-
-func isTransientOpenAIError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return true
-	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "connection reset by peer") ||
-		strings.Contains(text, "connection refused") ||
-		strings.Contains(text, "broken pipe") ||
-		strings.Contains(text, "server closed idle connection") ||
-		strings.Contains(text, "unexpected eof") ||
-		strings.Contains(text, "eof")
-}
-
-func isRetryableOpenAIStatus(status int) bool {
-	return status == http.StatusTooManyRequests ||
-		status == http.StatusBadGateway ||
-		status == http.StatusServiceUnavailable ||
-		status == http.StatusGatewayTimeout
-}
-
-func sleepBeforeOpenAIRetry(ctx context.Context, attempt int) error {
-	delay := time.Duration(attempt) * 200 * time.Millisecond
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func drainAndClose(body io.ReadCloser) {
-	if body == nil {
-		return
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(body, 4096))
-	_ = body.Close()
-}
-
-func formatOpenAITransportError(baseURL string, err error) error {
-	if err == nil {
-		return nil
-	}
-	if isTransientOpenAIError(err) {
-		return fmt.Errorf("openai-compatible API transient connection error at %s: %w (local server closed/reset the connection; retry the request or check the local model server logs)", baseURL, err)
-	}
-	return err
 }
 
 type openAIChatRequest struct {

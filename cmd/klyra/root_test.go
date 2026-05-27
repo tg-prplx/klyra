@@ -1,6 +1,8 @@
 package klyra
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,5 +58,27 @@ func TestTUILinesFromMessagesRestoresStats(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "stats: duration=2.5s input=1000 cached=200 output=150 reasoning=50 total=1150") {
 		t.Fatalf("stored stats were not restored properly: %#v", lines)
+	}
+}
+
+func TestSkillsCommandShowsMatchedSkill(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".klyra", "skills", "frontend.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("name: Frontend Cleanup\ntriggers: frontend, css\nAvoid glassmorphism."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{"--cwd", dir, "skills", "--query", "frontend css", "--content"})
+	var out strings.Builder
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Frontend Cleanup") || !strings.Contains(out.String(), "Avoid glassmorphism.") {
+		t.Fatalf("skills output missing matched skill:\n%s", out.String())
 	}
 }

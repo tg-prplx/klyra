@@ -27,6 +27,7 @@ import (
 	"klyra/pkg/llm"
 	"klyra/pkg/policy"
 	"klyra/pkg/session"
+	"klyra/pkg/skills"
 	"klyra/pkg/tools"
 	"klyra/pkg/tui"
 
@@ -65,6 +66,8 @@ type options struct {
 	contextCockpitMaxFiles int
 	contextRecipes         bool
 	noContextRecipes       bool
+	skills                 bool
+	noSkills               bool
 	negativeContext        bool
 	noNegativeContext      bool
 }
@@ -114,6 +117,8 @@ func newRootCommand() *cobra.Command {
 	root.PersistentFlags().IntVar(&opts.contextCockpitMaxFiles, "context-cockpit-files", 0, "maximum files ranked in context cockpit repo map")
 	root.PersistentFlags().BoolVar(&opts.contextRecipes, "context-recipes", false, "enable scoped context recipes")
 	root.PersistentFlags().BoolVar(&opts.noContextRecipes, "no-context-recipes", false, "disable scoped context recipes")
+	root.PersistentFlags().BoolVar(&opts.skills, "skills", false, "enable matched project skills")
+	root.PersistentFlags().BoolVar(&opts.noSkills, "no-skills", false, "disable matched project skills")
 	root.PersistentFlags().BoolVar(&opts.negativeContext, "negative-context", false, "enable negative context deny-list cards")
 	root.PersistentFlags().BoolVar(&opts.noNegativeContext, "no-negative-context", false, "disable negative context deny-list cards")
 
@@ -153,6 +158,7 @@ func newRootCommand() *cobra.Command {
 				ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
 				ContextRecipes:         runtimeCfg.ContextRecipes,
 				NegativeContext:        runtimeCfg.NegativeContext,
+				Skills:                 runtimeCfg.Skills,
 				Provider:               provider,
 				Input:                  os.Stdin,
 				Output:                 cmd.OutOrStdout(),
@@ -193,6 +199,7 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(newPolicyCommand())
 	root.AddCommand(newToolsCommand())
 	root.AddCommand(newInstructionsCommand(&opts))
+	root.AddCommand(newSkillsCommand(&opts))
 	root.AddCommand(newDoctorCommand(&opts))
 	root.AddCommand(newConfigCommand(&opts))
 	root.AddCommand(newSessionsCommand(&opts))
@@ -251,6 +258,7 @@ func newTUICommand(opts *options) *cobra.Command {
 				{Name: "/context", Description: "Show context cockpit fact cards"},
 				{Name: "/attach", Description: "Attach an image to the next model request"},
 				{Name: "/attachments", Description: "Show pending image attachments"},
+				{Name: "/skills", Description: "Show matched project skills"},
 				{Name: "/doctor", Description: "Check local runtime support"},
 				{Name: "/tools", Description: "List available agent tools"},
 				{Name: "/instructions", Description: "Show project instruction files"},
@@ -431,7 +439,7 @@ func newTUICommand(opts *options) *cobra.Command {
 							}
 						}
 						fallthrough
-					case "/doctor", "/tools", "/instructions", "/sessions", "/checkpoint", "/policy", "/config":
+					case "/doctor", "/tools", "/instructions", "/skills", "/sessions", "/checkpoint", "/policy", "/config":
 						cliCmdName := strings.TrimPrefix(cmdName, "/")
 						var out strings.Builder
 						subCmd := newRootCommand()
@@ -471,6 +479,7 @@ func newTUICommand(opts *options) *cobra.Command {
 					ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
 					ContextRecipes:         runtimeCfg.ContextRecipes,
 					NegativeContext:        runtimeCfg.NegativeContext,
+					Skills:                 runtimeCfg.Skills,
 					Provider:               provider,
 					Input:                  os.Stdin,
 					Output:                 &output,
@@ -597,6 +606,7 @@ func newTUICommand(opts *options) *cobra.Command {
 				ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
 				ContextRecipes:         runtimeCfg.ContextRecipes,
 				NegativeContext:        runtimeCfg.NegativeContext,
+				Skills:                 runtimeCfg.Skills,
 				FastModel:              runtimeCfg.ModelRoutes["fast"],
 				EditModel:              runtimeCfg.ModelRoutes["edit"],
 				DeepModel:              runtimeCfg.ModelRoutes["deep"],
@@ -790,6 +800,7 @@ func formatTUISettings(cfg appconfig.Config, attachments []llm.Attachment) strin
 	fmt.Fprintf(&builder, "- cockpit diff: `%s`\n", onOff(cfg.ContextCockpitDiff))
 	fmt.Fprintf(&builder, "- context recipes: `%s`\n", onOff(cfg.ContextRecipes))
 	fmt.Fprintf(&builder, "- negative context: `%s`\n", onOff(cfg.NegativeContext))
+	fmt.Fprintf(&builder, "- skills: `%s`\n", onOff(cfg.Skills))
 	fmt.Fprintf(&builder, "- pending images: `%d`\n", len(attachments))
 	builder.WriteString("\nUse `/provider`, `/model`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/mode`, `/cart add`, `/context`, and `/attach` to change this without leaving Klyra.")
 	return builder.String()
@@ -902,6 +913,12 @@ func applyTUISet(cfg *appconfig.Config, args []string) error {
 				return fmt.Errorf("negative_context must be on/off")
 			}
 			cfg.NegativeContext = parsed
+		case "skills":
+			parsed, err := parseBoolSetting(value)
+			if err != nil {
+				return fmt.Errorf("skills must be on/off")
+			}
+			cfg.Skills = parsed
 		default:
 			return fmt.Errorf("unknown setting %q", key)
 		}
@@ -1335,6 +1352,7 @@ func newChatCommand(opts *options) *cobra.Command {
 				ContextCockpitDiff:     runtimeCfg.ContextCockpitDiff,
 				ContextRecipes:         runtimeCfg.ContextRecipes,
 				NegativeContext:        runtimeCfg.NegativeContext,
+				Skills:                 runtimeCfg.Skills,
 				Provider:               provider,
 				Input:                  os.Stdin,
 				Output:                 cmd.OutOrStdout(),
@@ -1456,6 +1474,63 @@ func newInstructionsCommand(opts *options) *cobra.Command {
 	return cmd
 }
 
+func newSkillsCommand(opts *options) *cobra.Command {
+	var showContent bool
+	var all bool
+	var query string
+	cmd := &cobra.Command{
+		Use:   "skills [query]",
+		Short: "Show project skills matched into the system prompt",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runtimeCfg, err := effectiveConfig(cmd, *opts)
+			if err != nil {
+				return err
+			}
+			var result skills.Result
+			focus := strings.TrimSpace(query)
+			if focus == "" {
+				focus = strings.Join(args, " ")
+			}
+			if all || (strings.TrimSpace(focus) == "" && len(runtimeCfg.ContextFiles) == 0) {
+				result, err = skills.LoadAll(opts.cwd, runtimeCfg.MaxInstructions/2)
+			} else {
+				result, err = skills.Load(opts.cwd, focus, runtimeCfg.ContextFiles, runtimeCfg.MaxInstructions/2)
+			}
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			if len(result.Skills) == 0 {
+				fmt.Fprintln(out, "no project skills found")
+				return nil
+			}
+			for _, skill := range result.Skills {
+				suffix := ""
+				if skill.Truncated {
+					suffix = " truncated"
+				}
+				reason := ""
+				if skill.Reason != "" {
+					reason = " reason=" + skill.Reason
+				}
+				fmt.Fprintf(out, "%s name=%q bytes=%d%s%s\n", skill.Path, skill.Name, skill.Bytes, suffix, reason)
+			}
+			if result.Truncated {
+				fmt.Fprintf(out, "skill budget reached: %d bytes\n", runtimeCfg.MaxInstructions/2)
+			}
+			if showContent {
+				fmt.Fprintln(out, "\ncontent:")
+				fmt.Fprintln(out, result.Content)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&showContent, "content", false, "print loaded skill content")
+	cmd.Flags().BoolVar(&all, "all", false, "show all discovered skills instead of matched skills")
+	cmd.Flags().StringVar(&query, "query", "", "task text used to match skills")
+	return cmd
+}
+
 func newDoctorCommand(opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
@@ -1494,6 +1569,19 @@ func newDoctorCommand(opts *options) *cobra.Command {
 					names = append(names, file.Path)
 				}
 				fmt.Fprintf(out, "project_instructions: %s (%d bytes)\n", strings.Join(names, ", "), projectInstructions.Bytes)
+			}
+			projectSkills, err := skills.LoadAll(opts.cwd, runtimeCfg.MaxInstructions/2)
+			if err != nil {
+				return err
+			}
+			if len(projectSkills.Skills) == 0 {
+				fmt.Fprintln(out, "project_skills: none")
+			} else {
+				names := make([]string, 0, len(projectSkills.Skills))
+				for _, skill := range projectSkills.Skills {
+					names = append(names, skill.Path)
+				}
+				fmt.Fprintf(out, "project_skills: %s (%d bytes)\n", strings.Join(names, ", "), projectSkills.Bytes)
 			}
 			return nil
 		},
@@ -1673,6 +1761,12 @@ func effectiveConfig(cmd *cobra.Command, opts options) (appconfig.Config, error)
 	}
 	if flags.Changed("no-context-recipes") {
 		cfg.ContextRecipes = !opts.noContextRecipes
+	}
+	if flags.Changed("skills") {
+		cfg.Skills = opts.skills
+	}
+	if flags.Changed("no-skills") {
+		cfg.Skills = !opts.noSkills
 	}
 	if flags.Changed("negative-context") {
 		cfg.NegativeContext = opts.negativeContext

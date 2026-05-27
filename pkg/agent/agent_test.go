@@ -167,6 +167,36 @@ func TestAgentInjectsScopedContextRecipes(t *testing.T) {
 	}
 }
 
+func TestAgentInjectsMatchedSkills(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".klyra", "skills")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "frontend.md"), []byte("name: Frontend Cleanup\ntriggers: frontend, css\nAvoid glassmorphism."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	provider := &scriptedProvider{
+		responses: []llm.Response{{Content: "done"}},
+	}
+	agent, err := New(Config{
+		CWD:      root,
+		Provider: provider,
+		Output:   io.Discard,
+		Skills:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.RunConversation(context.Background(), nil, "remove glass from frontend css"); err != nil {
+		t.Fatal(err)
+	}
+	system := provider.requests[0].Messages[0].Content
+	if !strings.Contains(system, "Skills matched for this task") || !strings.Contains(system, "Avoid glassmorphism.") {
+		t.Fatalf("matched skill was not injected: %s", system)
+	}
+}
+
 func TestAgentReplacesSavedSystemMessageWithCurrentPrompt(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Current repo rule."), 0o644); err != nil {

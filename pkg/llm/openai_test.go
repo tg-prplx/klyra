@@ -78,7 +78,7 @@ func TestOpenAIProviderTreatsPrivateIPEndpointsAsLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !provider.omitStreamOptions || !provider.retryTransient {
+	if !provider.omitStreamOptions || provider.transport.retry.MaxAttempts != 3 {
 		t.Fatalf("expected private IP endpoint to use local compatibility settings: %+v", provider)
 	}
 }
