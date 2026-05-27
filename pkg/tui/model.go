@@ -225,6 +225,7 @@ type Model struct {
 	sidebarPosition        int // 0=left, 1=right
 	sidebarScroll          int // scroll offset for sidebar content
 	sidebarCursor          int // selected item in sidebar (-1 = none)
+	requestStartTime       time.Time
 
 	// Modal state
 	activeModal   modalKind
@@ -564,6 +565,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.reasoningText = ""
 			m.reasonExpanded = false
 			m.spinnerFrame = 0
+			m.requestStartTime = time.Now()
 			if len(m.lines) > 0 {
 				m.lines = append(m.lines, "")
 			}
@@ -638,6 +640,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		outText := strings.TrimSpace(msg.output)
+		var usageLine string
+		var cleanLines []string
+		for _, line := range strings.Split(outText, "\n") {
+			if strings.HasPrefix(line, "[TokenUsage] ") {
+				usageLine = line
+			} else {
+				cleanLines = append(cleanLines, line)
+			}
+		}
+		outText = strings.TrimSpace(strings.Join(cleanLines, "\n"))
+
 		var debugText string
 		if idx := strings.Index(outText, "Context Debugger"); idx >= 0 {
 			debugText = strings.TrimSpace(outText[idx:])
@@ -726,6 +739,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				flushMd()
 			}
 		}
+
+		if msg.agentRun {
+			var durationStr string = "0.0s"
+			if !m.requestStartTime.IsZero() {
+				elapsed := time.Since(m.requestStartTime)
+				durationStr = fmt.Sprintf("%.1fs", elapsed.Seconds())
+			}
+			var inputT, cachedT, outputT, reasoningT, totalT int
+			hasUsage := false
+			if usageLine != "" {
+				_, sscanfErr := fmt.Sscanf(usageLine, "[TokenUsage] input=%d cached=%d output=%d reasoning=%d total=%d", &inputT, &cachedT, &outputT, &reasoningT, &totalT)
+				if sscanfErr == nil {
+					hasUsage = true
+				}
+			}
+			statsLine := fmt.Sprintf("stats: duration=%s", durationStr)
+			if hasUsage {
+				statsLine += fmt.Sprintf(" input=%d cached=%d output=%d reasoning=%d total=%d", inputT, cachedT, outputT, reasoningT, totalT)
+			}
+			m.lines = append(m.lines, statsLine)
+		}
+
 		m.syncViewport(wasAtBottom)
 		return m, nil
 	}
@@ -879,6 +914,8 @@ func (m Model) buildFormattedLineItems() []formattedLineItem {
 			add(idx, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  tool rejected: "+line[15:]))
 		} else if strings.HasPrefix(line, "tool error: ") {
 			add(idx, lipgloss.NewStyle().Foreground(colorRed).Bold(true).Render("  tool error: "+line[12:]))
+		} else if strings.HasPrefix(line, "stats: ") {
+			add(idx, m.renderStatsLine(line)...)
 		} else if strings.HasPrefix(line, "usage: ") {
 			add(idx, lipgloss.NewStyle().Foreground(colorDim).Render("  usage: "+line[7:]))
 		} else if strings.HasPrefix(line, "policy: ") {
@@ -2157,6 +2194,69 @@ func pillBadge(text string, bg, fg lipgloss.Color) string {
 		style = style.Foreground(colorWhite)
 	}
 	return style.Render(text)
+}
+
+func (m Model) renderStatsLine(line string) []string {
+	parts := strings.Fields(line)
+	var durationVal string
+	var inputVal, cachedVal, outputVal, reasoningVal int
+
+	for _, part := range parts {
+		if strings.HasPrefix(part, "duration=") {
+			durationVal = strings.TrimPrefix(part, "duration=")
+		} else if strings.HasPrefix(part, "input=") {
+			inputVal = parsePositiveInt(strings.TrimPrefix(part, "input="))
+		} else if strings.HasPrefix(part, "cached=") {
+			cachedVal = parsePositiveInt(strings.TrimPrefix(part, "cached="))
+		} else if strings.HasPrefix(part, "output=") {
+			outputVal = parsePositiveInt(strings.TrimPrefix(part, "output="))
+		} else if strings.HasPrefix(part, "reasoning=") {
+			reasoningVal = parsePositiveInt(strings.TrimPrefix(part, "reasoning="))
+		}
+	}
+
+	timeStyle := lipgloss.NewStyle().Foreground(colorDim)
+	sepStyle := lipgloss.NewStyle().Foreground(colorMuted)
+
+	timeStr := timeStyle.Render(fmt.Sprintf("⚡ %s", durationVal))
+	sep := sepStyle.Render("  •  ")
+
+	ctxText := fmt.Sprintf("📊 %s ctx tokens", formatWithCommas(inputVal))
+	if cachedVal > 0 {
+		ctxText += fmt.Sprintf(" (%s cached)", formatWithCommas(cachedVal))
+	}
+	ctxBadge := pillBadge(ctxText, colorBadgeBg, colorBlue)
+
+	var outBadge string
+	if outputVal > 0 {
+		outText := fmt.Sprintf("✍️ %s out tokens", formatWithCommas(outputVal))
+		if reasoningVal > 0 {
+			outText += fmt.Sprintf(" (%s reasoning)", formatWithCommas(reasoningVal))
+		}
+		outBadge = " " + pillBadge(outText, colorBadgeBg3, colorBrand)
+	}
+
+	return []string{
+		"",
+		"  " + timeStr + sep + ctxBadge + outBadge,
+		"",
+	}
+}
+
+func formatWithCommas(value int) string {
+	if value < 0 {
+		return "0"
+	}
+	s := strconv.Itoa(value)
+	var res []string
+	for len(s) > 3 {
+		res = append([]string{s[len(s)-3:]}, res...)
+		s = s[:len(s)-3]
+	}
+	if len(s) > 0 {
+		res = append([]string{s}, res...)
+	}
+	return strings.Join(res, ",")
 }
 
 func statusGlyph(status string) string {

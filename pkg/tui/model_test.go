@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -1246,5 +1247,52 @@ func TestModelAPIKeyPersistence(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, "OPENAI_API_KEY=\"test-secret-key\"") {
 		t.Fatalf("expected .env file to contain key assignment, got:\n%s", content)
+	}
+}
+
+func TestResponseStatsAndTokens(t *testing.T) {
+	model := New(Config{})
+	model.requestStartTime = time.Now().Add(-2 * time.Second)
+
+	// Simulate responseMsg with [TokenUsage]
+	updated, _ := model.Update(responseMsg{
+		input:    "hello",
+		output:   "response text\n\n[TokenUsage] input=1250 cached=250 output=500 reasoning=100 total=2000",
+		agentRun: true,
+	})
+	m := updated.(Model)
+
+	// Verify stats line is appended
+	foundStats := false
+	var statsLine string
+	for _, line := range m.lines {
+		if strings.HasPrefix(line, "stats: ") {
+			foundStats = true
+			statsLine = line
+			break
+		}
+	}
+
+	if !foundStats {
+		t.Fatal("expected stats line to be appended to m.lines")
+	}
+
+	// Verify the parsed values in the stats line
+	if !strings.Contains(statsLine, "input=1250") || !strings.Contains(statsLine, "cached=250") || !strings.Contains(statsLine, "output=500") || !strings.Contains(statsLine, "reasoning=100") {
+		t.Fatalf("unexpected stats line content: %q", statsLine)
+	}
+
+	// Verify that the formatted lines include the formatted badges
+	formattedLines := m.buildFormattedLines()
+	hasStatsRendered := false
+	for _, fl := range formattedLines {
+		if strings.Contains(fl, "1,250 ctx tokens") && strings.Contains(fl, "250 cached") && strings.Contains(fl, "500 out tokens") && strings.Contains(fl, "100 reasoning") {
+			hasStatsRendered = true
+			break
+		}
+	}
+
+	if !hasStatsRendered {
+		t.Fatalf("expected formatted stats block, got lines:\n%s", strings.Join(formattedLines, "\n"))
 	}
 }

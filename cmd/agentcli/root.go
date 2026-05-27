@@ -543,13 +543,20 @@ func newTUICommand(opts *options) *cobra.Command {
 				}
 				captured := strings.TrimSpace(output.String())
 				debug := formatContextDebug(result.ContextDebug)
+				usageStr := fmt.Sprintf("[TokenUsage] input=%d cached=%d output=%d reasoning=%d total=%d",
+					result.Usage.InputTokens,
+					result.Usage.CachedTokens,
+					result.Usage.OutputTokens,
+					result.Usage.ReasoningTokens,
+					result.Usage.TotalTokens,
+				)
 				if sawStream {
-					return strings.TrimSpace(debug), err
+					return strings.TrimSpace(debug + "\n\n" + usageStr), err
 				}
 				if strings.Contains(captured, "tool:") || strings.Contains(captured, "tool error:") || strings.Contains(captured, "usage:") {
-					return strings.TrimSpace(output.String() + "\n\n" + debug), err
+					return strings.TrimSpace(output.String() + "\n\n" + debug + "\n\n" + usageStr), err
 				}
-				return strings.TrimSpace(result.Final + "\n\n" + debug), err
+				return strings.TrimSpace(result.Final + "\n\n" + debug + "\n\n" + usageStr), err
 			}
 
 			tuiModel := tui.New(tui.Config{
