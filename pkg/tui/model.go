@@ -1545,10 +1545,16 @@ func (m Model) renderAutocomplete() (string, int) {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorMuted).
-		MarginLeft(4).
 		Render(content)
 
-	return box, lipgloss.Height(box)
+	// Indent the entire block by 4 spaces to align with where user typing begins
+	boxLines := strings.Split(box, "\n")
+	for i, line := range boxLines {
+		boxLines[i] = "    " + line
+	}
+	indentedBox := strings.Join(boxLines, "\n")
+
+	return indentedBox, lipgloss.Height(indentedBox)
 }
 
 // ---------------------------------------------------------------------------
