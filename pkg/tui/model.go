@@ -52,12 +52,15 @@ var mouseEscapeFragmentPattern = regexp.MustCompile(`\[{3,}`)
 
 // Saturated gradient animation for the thinking indicator.
 var gradientPalette = []lipgloss.Color{
+	"#C084FC", // light purple
 	"#A855F7", // purple
 	"#8B5CF6", // violet
+	"#7C3AED", // deep violet
 	"#6366F1", // indigo
 	"#3B82F6", // blue
 	"#0EA5E9", // sky
 	"#06B6D4", // cyan
+	"#14B8A6", // teal
 }
 
 // Block density chars for soft-edge rendering.
@@ -274,9 +277,9 @@ type SessionLoadedMsg struct {
 func New(cfg Config) Model {
 	input := textinput.New()
 	input.Placeholder = "Ask anything or type / for commands..."
-	input.Prompt = "  > "
+	input.Prompt = "  ◆ "
 	input.PromptStyle = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
-	input.TextStyle = lipgloss.NewStyle().Foreground(colorText)
+	input.TextStyle = lipgloss.NewStyle().Foreground(colorWhite)
 	input.Cursor.Style = lipgloss.NewStyle().Foreground(colorBrand)
 	input.Cursor.Blink = false
 	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
@@ -1476,15 +1479,15 @@ func (m Model) View() string {
 		}
 	case modalHelp:
 		if m.helpModal != nil {
-			body = centerOverlay(m.width, m.viewport.Height, m.helpModal.View(m.width, m.height))
+			body = centerOverlay(m.width, m.viewport.Height, m.helpModal.View(m.width, m.viewport.Height))
 		}
 	case modalSettings:
 		if m.settingsModal != nil {
-			body = centerOverlay(m.width, m.viewport.Height, m.settingsModal.View(m.width, m.height))
+			body = centerOverlay(m.width, m.viewport.Height, m.settingsModal.View(m.width, m.viewport.Height))
 		}
 	case modalFeatures:
 		if m.featuresModal != nil {
-			body = centerOverlay(m.width, m.viewport.Height, m.featuresModal.View(m.width, m.height))
+			body = centerOverlay(m.width, m.viewport.Height, m.featuresModal.View(m.width, m.viewport.Height))
 		}
 	}
 
@@ -1795,13 +1798,7 @@ func (m Model) updateHelpModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.helpModal.ScrollUp()
 		return m, nil
 	case "down", "j":
-		// Calculate total lines for scroll bounds
-		total := 0
-		for _, cat := range m.helpModal.Categories {
-			total += 2 + len(cat.Commands) // header + blank + commands
-		}
-		total += 8 // keyboard shortcuts section + padding
-		m.helpModal.ScrollDown(total)
+		m.helpModal.ScrollDown()
 		return m, nil
 	}
 	return m, nil
@@ -2117,7 +2114,7 @@ func (m Model) renderHeader() string {
 		titleText = "Klyra"
 	}
 	title := lipgloss.NewStyle().Foreground(colorBrand).Bold(true).Render(titleText)
-	subtitle := lipgloss.NewStyle().Foreground(colorDim).Render("  agentic coding workspace")
+	subtitle := lipgloss.NewStyle().Foreground(colorDim).Render("  versatile project assistant")
 
 	// Status
 	status := "ready"
@@ -2142,9 +2139,18 @@ func (m Model) renderHeader() string {
 	// Budget info
 	budgets := m.renderHeaderBudgets(width - 2)
 
-	// Separator bar
+	// Gradient separator bar
 	barWidth := max(10, min(width-2, 90))
-	bar := lipgloss.NewStyle().Foreground(colorSeparator).Render(strings.Repeat("─", barWidth))
+	hdrGradColors := []string{"#7C3AED", "#6366F1", "#3B82F6", "#0EA5E9", "#06B6D4", "#0EA5E9", "#3B82F6", "#6366F1", "#7C3AED"}
+	var barBuilder strings.Builder
+	for i := 0; i < barWidth; i++ {
+		ci := i * len(hdrGradColors) / barWidth
+		if ci >= len(hdrGradColors) {
+			ci = len(hdrGradColors) - 1
+		}
+		barBuilder.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(hdrGradColors[ci])).Render("─"))
+	}
+	bar := barBuilder.String()
 
 	topLine := lipgloss.JoinHorizontal(lipgloss.Top, title, subtitle)
 	badgeLine := lipgloss.JoinHorizontal(lipgloss.Top, statusBadge, " ", providerBadge, " ", modelBadge, " ", reasoningBadge)
@@ -2211,7 +2217,6 @@ func (m Model) renderFooter() string {
 	cmdHintStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	cmdSlashStyle := lipgloss.NewStyle().Foreground(colorBrandDim)
 	modelStyle := lipgloss.NewStyle().Foreground(colorDim)
-	sepStyle := lipgloss.NewStyle().Foreground(colorSeparator)
 
 	leftParts := []string{
 		cmdSlashStyle.Render("/") + cmdHintStyle.Render("help"),
@@ -2230,7 +2235,7 @@ func (m Model) renderFooter() string {
 		sidebarHint = "F7 " + []string{"files", "diff", "context"}[m.sidebarMode]
 	}
 	posHint := "F8 " + []string{"→right", "→left"}[m.sidebarPosition]
-	hints := []string{"F2 settings", sidebarHint, posHint, copyHint}
+	hints := []string{"F2 settings", "F5 features", sidebarHint, posHint, copyHint}
 	if m.contextDebug != "" {
 		if m.debugExpanded {
 			hints = append([]string{"F3 hide context"}, hints...)
@@ -2241,7 +2246,18 @@ func (m Model) renderFooter() string {
 	settingsHint := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(hints, "  "))
 	rightFooter := modelStyle.Render(valueOr(m.model, "routed")) + "  " + settingsHint + " "
 
-	separator := sepStyle.Render(strings.Repeat("─", max(10, m.width)))
+	// Gradient separator
+	sepWidth := max(10, m.width)
+	gradColors := []string{"#7C3AED", "#6366F1", "#3B82F6", "#0EA5E9", "#06B6D4", "#0EA5E9", "#3B82F6", "#6366F1", "#7C3AED"}
+	var sepBuilder strings.Builder
+	for i := 0; i < sepWidth; i++ {
+		colorIdx := i * len(gradColors) / sepWidth
+		if colorIdx >= len(gradColors) {
+			colorIdx = len(gradColors) - 1
+		}
+		sepBuilder.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(gradColors[colorIdx])).Render("─"))
+	}
+	separator := sepBuilder.String()
 
 	return lipgloss.JoinVertical(lipgloss.Left, separator, leftFooter+strings.Repeat(" ", max(0, m.width-lipgloss.Width(leftFooter)-lipgloss.Width(rightFooter)))+rightFooter)
 }
@@ -2251,7 +2267,7 @@ func (m Model) renderFooter() string {
 // ---------------------------------------------------------------------------
 
 func (m Model) renderThinkingBar() string {
-	const barWidth = 12
+	const barWidth = 18
 	head := m.spinnerFrame % barWidth
 
 	var bar strings.Builder
@@ -2263,8 +2279,9 @@ func (m Model) renderThinkingBar() string {
 		bar.WriteString(lipgloss.NewStyle().Foreground(col).Render(string(ch)))
 	}
 
+	accent := lipgloss.NewStyle().Foreground(colorBrandDim).Render("⟩")
 	label := lipgloss.NewStyle().Foreground(colorMuted).Italic(true).Render(" thinking...")
-	return "  " + bar.String() + label
+	return "  " + bar.String() + " " + accent + label
 }
 
 func circularDistance(a, b, width int) int {
@@ -2543,7 +2560,10 @@ func (m Model) renderStatsLine(line string) []string {
 	timeStyle := lipgloss.NewStyle().Foreground(colorDim)
 	sepStyle := lipgloss.NewStyle().Foreground(colorMuted)
 
-	timeStr := timeStyle.Render(durationVal)
+	var timeStr string
+	if durationVal != "" {
+		timeStr = timeStyle.Render("🕒 " + durationVal)
+	}
 	sep := sepStyle.Render("  •  ")
 
 	ctxText := fmt.Sprintf("%s ctx tokens", formatWithCommas(inputVal))
@@ -2561,9 +2581,16 @@ func (m Model) renderStatsLine(line string) []string {
 		outBadge = " " + pillBadge(outText, colorBadgeBg3, colorBrand)
 	}
 
+	var lineParts string
+	if timeStr != "" {
+		lineParts = timeStr + sep + ctxBadge + outBadge
+	} else {
+		lineParts = ctxBadge + outBadge
+	}
+
 	return []string{
 		"",
-		"  " + timeStr + sep + ctxBadge + outBadge,
+		"  " + lineParts,
 		"",
 	}
 }
@@ -3151,16 +3178,17 @@ func (m Model) renderToolLine(raw string) []string {
 	headerStyle := lipgloss.NewStyle().Foreground(colorEmerald).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.chatWidth()-10))
-	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	borderStyle := lipgloss.NewStyle().Foreground(colorBrandDim)
 	errorStyle := lipgloss.NewStyle().Foreground(colorRed)
 
 	icon := "▸"
 	if expanded {
 		icon = "▾"
 	}
+	toolIcon := lipgloss.NewStyle().Foreground(colorAmber).Render("⚙")
 	summary := toolDisplaySummary(display)
 	lines := []string{
-		"  " + headerStyle.Render(icon+" "+display.Tool) + " " + labelStyle.Render(summary),
+		"  " + toolIcon + " " + headerStyle.Render(icon+" "+display.Tool) + " " + labelStyle.Render(summary),
 	}
 	if !expanded {
 		return lines
@@ -3333,11 +3361,11 @@ func min(left, right int) int {
 // ---------------------------------------------------------------------------
 
 const (
-	userPrefix   = ">"
-	agentBar     = "|"
-	errorPrefix  = "x"
-	systemPrefix = "-"
-	acPointer    = ">"
+	userPrefix   = "❯"
+	agentBar     = "│"
+	errorPrefix  = "✖"
+	systemPrefix = "›"
+	acPointer    = "▸"
 )
 
 // ---------------------------------------------------------------------------
@@ -3346,20 +3374,21 @@ const (
 
 var (
 	userMsgStyle = lipgloss.NewStyle().
-			Foreground(colorBlue)
+			Foreground(colorBlue).
+			Bold(true)
 
 	agentMsgStyle = lipgloss.NewStyle().
 			Foreground(colorText)
 
 	agentBarStyle = lipgloss.NewStyle().
-			Foreground(colorBrand)
+			Foreground(colorBrandDim)
 
 	errorMsgStyle = lipgloss.NewStyle().
 			Foreground(colorRed).
 			Bold(true)
 
 	systemMsgStyle = lipgloss.NewStyle().
-			Foreground(colorMuted).
+			Foreground(colorDim).
 			Italic(true)
 
 	acItemStyle = lipgloss.NewStyle().

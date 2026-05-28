@@ -75,8 +75,17 @@ func (h *HelpModal) ScrollUp() {
 	}
 }
 
-func (h *HelpModal) ScrollDown(totalLines int) {
-	if h.Scroll < totalLines-h.MaxVisible {
+func (h HelpModal) totalLines() int {
+	total := 17 // 15 shortcuts + 2 trailing lines
+	for _, cat := range h.Categories {
+		total += 1 + len(cat.Commands)
+	}
+	return total
+}
+
+func (h *HelpModal) ScrollDown() {
+	total := h.totalLines()
+	if h.Scroll < total-h.MaxVisible {
 		h.Scroll++
 	}
 }
