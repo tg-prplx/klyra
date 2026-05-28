@@ -70,6 +70,59 @@ func TestFetchURLConvertsHTMLToText(t *testing.T) {
 	}
 }
 
+func TestFetchURLUsesFocusedRetrieval(t *testing.T) {
+	page := `<html><body>
+		<h1>Release notes</h1>
+		<p>` + strings.Repeat("navigation overview unrelated filler ", 120) + `</p>
+		<h2>Authentication</h2>
+		<p>The new ValidateToken flow checks token validation errors and refresh handling.</p>
+		<p>Use the auth middleware when token validation fails.</p>
+		<h2>Unrelated</h2>
+		<p>` + strings.Repeat("billing invoice export ", 120) + `</p>
+	</body></html>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(page))
+	}))
+	defer server.Close()
+
+	result, err := FetchURL{Client: server.Client()}.Run(context.Background(), Invocation{
+		Args: map[string]any{
+			"url":        server.URL,
+			"max_bytes":  20000,
+			"query":      "token validation auth",
+			"max_tokens": 400,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, "embeddings: local-hash") || !strings.Contains(result.Output, "ValidateToken") || !strings.Contains(result.Output, "token validation") {
+		t.Fatalf("focused retrieval missed relevant page chunk:\n%s", result.Output)
+	}
+	if strings.Count(result.Output, "billing invoice export") > 3 {
+		t.Fatalf("focused retrieval included too much unrelated content:\n%s", result.Output)
+	}
+}
+
+func TestFetchURLFallsBackWhenNoFocusQuery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<html><body><p>General page text</p></body></html>`))
+	}))
+	defer server.Close()
+
+	result, err := FetchURL{Client: server.Client()}.Run(context.Background(), Invocation{
+		Args: map[string]any{"url": server.URL},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Output, "embeddings: local-hash") || !strings.Contains(result.Output, "General page text") {
+		t.Fatalf("expected non-focused fallback output, got:\n%s", result.Output)
+	}
+}
+
 func TestWebToolsExposedForInternetTasks(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForTask("найди актуальную информацию в интернете")
 	if !hasToolSpec(specs, "web_search") || !hasToolSpec(specs, "fetch_url") {

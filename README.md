@@ -281,6 +281,7 @@ The context cockpit also builds a small retrieval cart before each task. It rank
 - `replace_symbol`, `replace_lines`, `insert_lines`: focused write tools for existing files.
 - `write_file`: legacy full-file writer; hidden from normal edit prompts and blocked from overwriting existing files in edit/refactor/repair mode.
 - `search`: searches with `rg`.
+- `web_search`, `fetch_url`: searches public web and fetches pages; `fetch_url` can use a focus query to return only relevant page chunks via local retrieval.
 - `bash`: runs shell commands with timeout and output compression.
 - `diff_patch`: applies unified diffs via `git apply`.
 
