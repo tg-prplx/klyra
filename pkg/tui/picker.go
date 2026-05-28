@@ -237,10 +237,17 @@ func (p *PickerModal) View(termWidth, termHeight int) string {
 
 	// Hard-cap height to prevent any overflow past the terminal.
 	// In Lipgloss, MaxHeight restricts the content area (inner size).
+	// We want outer height to be at most termHeight - 2 to leave 1-line margin top/bottom.
 	// Outer height = content + borders (2) + paddingY * 2.
-	maxInnerHeight := termHeight - 2 - paddingY*2
+	maxInnerHeight := termHeight - 4 - paddingY*2
 	if maxInnerHeight < 2 {
 		maxInnerHeight = 2
+	}
+
+	// Manually truncate the array to strictly guarantee that the rendered box
+	// height does not exceed maxInnerHeight lines under any circumstances.
+	if len(fitted) > maxInnerHeight {
+		fitted = fitted[:maxInnerHeight]
 	}
 
 	box := lipgloss.NewStyle().
