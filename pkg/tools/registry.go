@@ -42,6 +42,7 @@ func NewRegistry(toolList ...Tool) *Registry {
 
 func NewDefaultRegistry() *Registry {
 	return NewRegistry(
+		Guide{},
 		ProjectMap{},
 		GitStatus{},
 		GitDiff{},
@@ -89,6 +90,7 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 	task = strings.ToLower(task)
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	names := map[string]bool{
+		"guide":        true,
 		"project_map":  true,
 		"search":       true,
 		"file_outline": true,
@@ -107,7 +109,14 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 	}
 	writeIntent := mentionsEdit(task)
 	skillCreateIntent := mentionsSkill(task) && writeIntent
-	if writeIntent {
+	focusedSkillCreation := skillCreateIntent && mode == "edit" && len(contextFiles) == 0
+	if focusedSkillCreation {
+		names = map[string]bool{
+			"guide":       true,
+			"create_file": true,
+		}
+	}
+	if writeIntent && !focusedSkillCreation {
 		names["diff_patch"] = true
 		names["diff_preview"] = true
 		names["insert_lines"] = true

@@ -271,6 +271,7 @@ The context cockpit also builds a small retrieval cart before each task. It rank
 
 ## Implemented tools
 
+- `guide`: returns compact task-specific workflow guidance on demand, so unfamiliar work does not require injecting every playbook into the prompt.
 - `project_map`: token-budgeted repo map for low-token discovery; includes important files and AST symbols.
 - `list_files`: lists workspace files while skipping common generated directories.
 - `read_file`: reads files with line slicing.

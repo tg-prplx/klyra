@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"klyra/pkg/llm"
@@ -14,6 +15,9 @@ func TestSpecsForTaskPrunesWriteToolsForInspection(t *testing.T) {
 	}
 	if !hasSpec(specs, "project_map") || !hasSpec(specs, "file_outline") || !hasSpec(specs, "read_symbol") || !hasSpec(specs, "read_file") {
 		t.Fatalf("inspection should include retrieval tools: %+v", specs)
+	}
+	if !hasSpec(specs, "guide") {
+		t.Fatalf("inspection should include dynamic guide tool: %+v", specs)
 	}
 }
 
@@ -32,8 +36,26 @@ func TestEditModeExposesCreateFileForSkillCreationWithoutContextCart(t *testing.
 	if !hasSpec(specs, "create_file") {
 		t.Fatalf("skill creation should expose create_file even without context cart: %+v", specs)
 	}
-	if hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "insert_lines") {
-		t.Fatalf("skill creation without context cart should not expose broad edit tools: %+v", specs)
+	if !hasSpec(specs, "guide") {
+		t.Fatalf("skill creation should expose guide: %+v", specs)
+	}
+	if hasSpec(specs, "project_map") || hasSpec(specs, "bash") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "insert_lines") {
+		t.Fatalf("skill creation without context cart should expose only focused tools: %+v", specs)
+	}
+}
+
+func TestGuideReturnsSkillCreationWorkflow(t *testing.T) {
+	result, err := Guide{}.Run(context.Background(), Invocation{
+		CWD: t.TempDir(),
+		Args: map[string]any{
+			"query": "напиши сам себе скилл для github issue summary",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, ".klyra/skills") || !strings.Contains(result.Output, "Use create_file") || !strings.Contains(result.Output, "Do not inspect sessions, .env") {
+		t.Fatalf("unexpected guide output:\n%s", result.Output)
 	}
 }
 
