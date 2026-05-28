@@ -105,7 +105,9 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 	if mentionsShell(task) || mentionsTest(task) {
 		names["bash"] = true
 	}
-	if mentionsEdit(task) {
+	writeIntent := mentionsEdit(task)
+	skillCreateIntent := mentionsSkill(task) && writeIntent
+	if writeIntent {
 		names["diff_patch"] = true
 		names["diff_preview"] = true
 		names["insert_lines"] = true
@@ -149,7 +151,9 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 		}
 	case "edit":
 		if len(contextFiles) == 0 {
-			delete(names, "create_file")
+			if !skillCreateIntent {
+				delete(names, "create_file")
+			}
 			delete(names, "diff_patch")
 			delete(names, "insert_lines")
 			delete(names, "replace_lines")
@@ -210,6 +214,9 @@ func enforceMode(mode string, contextFiles []string, call llm.ToolCall) error {
 		}
 	case "edit":
 		if isFileWriteTool(call.Name) {
+			if call.Name == "create_file" && isProjectSkillPath(primaryWritePath(call)) {
+				return nil
+			}
 			if len(contextFiles) == 0 {
 				return fmt.Errorf("mode edit requires files in context cart before %s", call.Name)
 			}
@@ -261,6 +268,19 @@ func pathAllowed(path string, contextFiles []string) bool {
 		if path == allowed {
 			return true
 		}
+	}
+	return false
+}
+
+func isProjectSkillPath(path string) bool {
+	path = strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || strings.Contains(path, "../") {
+		return false
+	}
+	if strings.HasPrefix(path, ".klyra/skills/") || strings.HasPrefix(path, ".agentcli/skills/") || strings.HasPrefix(path, "skills/") {
+		return strings.HasSuffix(path, ".md")
 	}
 	return false
 }
@@ -327,6 +347,14 @@ func mentionsEdit(task string) bool {
 		"implement", "add ", "fix", "change", "edit", "write", "refactor", "delete",
 		"реализ", "добав", "исправ", "измени", "поправ", "напиши", "удали", "рефактор",
 	})
+}
+
+func TaskLooksLikeWriteRequest(task string) bool {
+	return mentionsEdit(strings.ToLower(task))
+}
+
+func mentionsSkill(task string) bool {
+	return containsAny(task, []string{"skill", "skills", "скилл", "скил", "навык"})
 }
 
 func mentionsWeb(task string) bool {

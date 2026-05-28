@@ -308,6 +308,28 @@ func TestAgentInjectsMatchedSkills(t *testing.T) {
 	}
 }
 
+func TestAgentFailsFastForWriteRequestInInspectMode(t *testing.T) {
+	provider := &scriptedProvider{
+		responses: []llm.Response{{Content: "should not be called"}},
+	}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Output:   io.Discard,
+		Mode:     "inspect",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = agent.RunConversation(context.Background(), nil, "напиши сам себе скилл")
+	if err == nil || !strings.Contains(err.Error(), "mode inspect blocks write-like requests") {
+		t.Fatalf("expected inspect mode write guard, got %v", err)
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("provider should not be called for blocked inspect write request: %+v", provider.requests)
+	}
+}
+
 func TestAgentReplacesSavedSystemMessageWithCurrentPrompt(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Current repo rule."), 0o644); err != nil {
@@ -717,7 +739,7 @@ func TestAgentModeShapesVisibleTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := agent.RunConversation(context.Background(), nil, "fix bug")
+	result, err := agent.RunConversation(context.Background(), nil, "inspect bug")
 	if err != nil {
 		t.Fatal(err)
 	}

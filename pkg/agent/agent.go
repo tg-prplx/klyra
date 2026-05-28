@@ -170,6 +170,9 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	if task == "" {
 		return RunResult{}, fmt.Errorf("task cannot be empty")
 	}
+	if strings.EqualFold(strings.TrimSpace(a.cfg.Mode), "inspect") && tools.TaskLooksLikeWriteRequest(task) {
+		return RunResult{}, fmt.Errorf("mode inspect blocks write-like requests; switch to edit mode with /mode edit or ask for inspection only")
+	}
 
 	scopedInstructions, scopedErr := instructions.LoadScoped(a.cfg.CWD, task, a.cfg.ContextFiles, a.cfg.MaxInstructions/2)
 	var skillSet skills.Result

@@ -27,6 +27,16 @@ func TestSpecsForTaskIncludesEditToolsForImplementation(t *testing.T) {
 	}
 }
 
+func TestEditModeExposesCreateFileForSkillCreationWithoutContextCart(t *testing.T) {
+	specs := NewDefaultRegistry().SpecsForTaskMode("напиши сам себе скилл для issue summary", "edit", nil)
+	if !hasSpec(specs, "create_file") {
+		t.Fatalf("skill creation should expose create_file even without context cart: %+v", specs)
+	}
+	if hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "insert_lines") {
+		t.Fatalf("skill creation without context cart should not expose broad edit tools: %+v", specs)
+	}
+}
+
 func TestRunWithSandboxBlocksWriteInReadOnly(t *testing.T) {
 	_, err := NewDefaultRegistry().RunWithSandbox(context.Background(), t.TempDir(), "read-only", llm.ToolCall{
 		Name:      "write_file",
@@ -81,6 +91,24 @@ func TestEditModeBlocksCreateFileOutsideContextCart(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected edit mode to block create_file outside context cart")
+	}
+}
+
+func TestEditModeAllowsProjectSkillCreateWithoutContextCart(t *testing.T) {
+	dir := t.TempDir()
+	result, err := NewDefaultRegistry().RunWithPolicy(context.Background(), dir, "workspace-write", "edit", nil, llm.ToolCall{
+		Name: "create_file",
+		Arguments: map[string]any{
+			"path":        ".klyra/skills/issues.md",
+			"content":     "name: Issue Summary\ntriggers: issue, github\nSummarize linked issues.",
+			"description": "skill for issue summaries",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output == "" {
+		t.Fatal("expected create_file output")
 	}
 }
 
