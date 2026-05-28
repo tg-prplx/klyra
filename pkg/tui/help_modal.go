@@ -217,13 +217,12 @@ func (h *HelpModal) View(termWidth, termHeight int) string {
 		boxWidth = 48
 	}
 
-	// Hard-cap height to prevent any overflow past the terminal
-	maxBoxHeight := termHeight - 2
-	if maxBoxHeight < 4 {
-		maxBoxHeight = 4
-	}
-	if maxBoxHeight > termHeight {
-		maxBoxHeight = termHeight
+	// Hard-cap height to prevent any overflow past the terminal.
+	// In Lipgloss, MaxHeight restricts the content area (inner size).
+	// Outer height = content + borders (2) + paddingY * 2.
+	maxInnerHeight := termHeight - 2 - paddingY*2
+	if maxInnerHeight < 2 {
+		maxInnerHeight = 2
 	}
 
 	box := lipgloss.NewStyle().
@@ -232,7 +231,7 @@ func (h *HelpModal) View(termWidth, termHeight int) string {
 		Foreground(colorText).
 		Padding(paddingY, 2).
 		Width(boxWidth).
-		MaxHeight(maxBoxHeight).
+		MaxHeight(maxInnerHeight).
 		Render(content)
 
 	if termWidth > 0 {
