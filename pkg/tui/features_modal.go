@@ -301,13 +301,16 @@ func (f *FeaturesModal) View(termWidth, termHeight int) string {
 		maxInnerHeight = 2
 	}
 
+	joined := strings.Join(visibleLines, "\n")
+	flatLines := strings.Split(joined, "\n")
+
 	// Manually truncate visibleLines to strictly guarantee that the rendered box
 	// height does not exceed maxInnerHeight lines under any circumstances.
-	if len(visibleLines) > maxInnerHeight {
-		visibleLines = visibleLines[:maxInnerHeight]
+	if len(flatLines) > maxInnerHeight {
+		flatLines = flatLines[:maxInnerHeight]
 	}
 
-	content = strings.Join(visibleLines, "\n")
+	content = strings.Join(flatLines, "\n")
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

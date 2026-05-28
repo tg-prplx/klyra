@@ -1567,11 +1567,37 @@ func (m Model) renderApprovalModal() string {
 		return ""
 	}
 
+	termHeight := m.viewport.Height
+	paddingY := 1
+	if termHeight <= 14 {
+		paddingY = 0
+	}
+
+	// Calculate strict space budgets
+	maxInnerHeight := termHeight - 4 - paddingY*2
+	if maxInnerHeight < 4 {
+		maxInnerHeight = 4
+	}
+
 	titleStyle := lipgloss.NewStyle().Foreground(colorAmber).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(colorDim)
 	valueStyle := lipgloss.NewStyle().Foreground(colorText).Bold(true)
 	keyStyle := lipgloss.NewStyle().Foreground(colorEmerald).Bold(true)
 	keyRejectStyle := lipgloss.NewStyle().Foreground(colorRed).Bold(true)
+
+	// Calculate maximum lines for arguments preview to avoid overflow
+	overhead := 6 // title + blank + tool + blank + buttons (5) + blank (1)
+	if req.Risk != "" {
+		overhead++
+	}
+	if req.Reason != "" {
+		overhead++
+	}
+
+	maxArgLines := maxInnerHeight - overhead
+	if maxArgLines < 3 {
+		maxArgLines = 3
+	}
 
 	lines := []string{
 		titleStyle.Render("Approval required"),
@@ -1584,7 +1610,7 @@ func (m Model) renderApprovalModal() string {
 	if req.Reason != "" {
 		lines = append(lines, labelStyle.Render("reason: ")+valueStyle.Render(req.Reason))
 	}
-	if preview := formatApprovalArgs(req.Args, m.width-12); preview != "" {
+	if preview := formatApprovalArgs(req.Args, m.width-12, maxArgLines); preview != "" {
 		lines = append(lines, "")
 		lines = append(lines, labelStyle.Render("arguments:"))
 		for _, line := range strings.Split(preview, "\n") {
@@ -1594,15 +1620,20 @@ func (m Model) renderApprovalModal() string {
 	lines = append(lines, "")
 	lines = append(lines, keyStyle.Render("[Y] Approve")+"  "+keyRejectStyle.Render("[N] Reject"))
 
+	if len(lines) > maxInnerHeight {
+		lines = lines[:maxInnerHeight]
+	}
+
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(colorAmber).
 		Foreground(colorText).
-		Padding(1, 2).
+		Padding(paddingY, 2).
+		MaxHeight(maxInnerHeight).
 		Render(strings.Join(lines, "\n"))
 }
 
-func formatApprovalArgs(args map[string]any, width int) string {
+func formatApprovalArgs(args map[string]any, width, maxLines int) string {
 	if len(args) == 0 {
 		return ""
 	}
@@ -1621,7 +1652,9 @@ func formatApprovalArgs(args map[string]any, width int) string {
 		return ""
 	}
 	lines := strings.Split(strings.TrimSpace(builder.String()), "\n")
-	const maxLines = 18
+	if maxLines <= 0 {
+		maxLines = 18
+	}
 	if len(lines) > maxLines {
 		lines = append(lines[:maxLines], fmt.Sprintf("... %d more line(s)", len(lines)-maxLines))
 	}

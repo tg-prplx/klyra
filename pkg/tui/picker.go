@@ -244,11 +244,15 @@ func (p *PickerModal) View(termWidth, termHeight int) string {
 		maxInnerHeight = 2
 	}
 
-	// Manually truncate the array to strictly guarantee that the rendered box
+	joined := strings.Join(fitted, "\n")
+	flatLines := strings.Split(joined, "\n")
+
+	// Manually truncate the flat lines array to strictly guarantee that the rendered box
 	// height does not exceed maxInnerHeight lines under any circumstances.
-	if len(fitted) > maxInnerHeight {
-		fitted = fitted[:maxInnerHeight]
+	if len(flatLines) > maxInnerHeight {
+		flatLines = flatLines[:maxInnerHeight]
 	}
+	content := strings.Join(flatLines, "\n")
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -257,7 +261,7 @@ func (p *PickerModal) View(termWidth, termHeight int) string {
 		Padding(paddingY, 2).
 		Width(boxWidth).
 		MaxHeight(maxInnerHeight).
-		Render(strings.Join(fitted, "\n"))
+		Render(content)
 
 	// Center horizontally
 	if termWidth > 0 {
