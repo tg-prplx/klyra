@@ -20,12 +20,14 @@ type PickerOption struct {
 
 // PickerModal is a reusable modal for choosing one value from a list.
 type PickerModal struct {
-	Title   string
-	Options []PickerOption
-	Cursor  int
-	Current string // currently active value (shown with ●)
-	Width   int
-	Field   string // setting field name for the callback, e.g. "approval"
+	Title      string
+	Options    []PickerOption
+	Cursor     int
+	Current    string // currently active value (shown with ●)
+	Width      int
+	Field      string // setting field name for the callback, e.g. "approval"
+	Scroll     int
+	MaxVisible int
 }
 
 // NewPicker creates a PickerModal pre-selecting the current value.
@@ -38,12 +40,29 @@ func NewPicker(title, field, current string, options []PickerOption) PickerModal
 		}
 	}
 	return PickerModal{
-		Title:   title,
-		Field:   field,
-		Options: options,
-		Cursor:  cursor,
-		Current: current,
-		Width:   48,
+		Title:      title,
+		Field:      field,
+		Options:    options,
+		Cursor:     cursor,
+		Current:    current,
+		Width:      48,
+		Scroll:     0,
+		MaxVisible: 10,
+	}
+}
+
+func (p *PickerModal) adjustScroll() {
+	if p.Cursor < 0 {
+		p.Cursor = 0
+	}
+	if p.Cursor >= len(p.Options) {
+		p.Cursor = len(p.Options) - 1
+	}
+	if p.Cursor < p.Scroll {
+		p.Scroll = p.Cursor
+	}
+	if p.Cursor >= p.Scroll+p.MaxVisible {
+		p.Scroll = p.Cursor - p.MaxVisible + 1
 	}
 }
 
@@ -52,6 +71,7 @@ func (p *PickerModal) MoveUp() {
 	if p.Cursor < 0 {
 		p.Cursor = len(p.Options) - 1
 	}
+	p.adjustScroll()
 }
 
 func (p *PickerModal) MoveDown() {
@@ -59,6 +79,7 @@ func (p *PickerModal) MoveDown() {
 	if p.Cursor >= len(p.Options) {
 		p.Cursor = 0
 	}
+	p.adjustScroll()
 }
 
 // SelectedValue returns the value at the current cursor position.
@@ -70,7 +91,7 @@ func (p *PickerModal) SelectedValue() string {
 }
 
 // View renders the picker modal.
-func (p PickerModal) View(termWidth int) string {
+func (p PickerModal) View(termWidth, termHeight int) string {
 	titleStyle := lipgloss.NewStyle().
 		Foreground(colorBrand).
 		Bold(true)
@@ -96,10 +117,7 @@ func (p PickerModal) View(termWidth int) string {
 	hintKeyStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	hintTextStyle := lipgloss.NewStyle().Foreground(colorDim)
 
-	var lines []string
-	lines = append(lines, titleStyle.Render(p.Title))
-	lines = append(lines, "")
-
+	var optionLines []string
 	for i, opt := range p.Options {
 		label := opt.Label
 		if label == "" {
@@ -126,11 +144,50 @@ func (p PickerModal) View(termWidth int) string {
 			line += " " + descStyle.Render(opt.Description)
 		}
 
-		lines = append(lines, line)
+		optionLines = append(optionLines, line)
 	}
 
-	lines = append(lines, "")
-	lines = append(lines,
+	// Apply scrolling to options
+	visibleMax := p.MaxVisible
+	if termHeight > 0 {
+		visibleMax = termHeight - 8 // Leave room for title (2 lines) and hint (2 lines) and borders
+		if visibleMax < 3 {
+			visibleMax = 3
+		}
+	}
+	p.MaxVisible = visibleMax
+
+	visibleOptions := optionLines
+	if len(optionLines) > visibleMax {
+		end := p.Scroll + visibleMax
+		if end > len(optionLines) {
+			end = len(optionLines)
+		}
+		start := p.Scroll
+		if start >= len(optionLines) {
+			start = len(optionLines) - 1
+		}
+		if start < 0 {
+			start = 0
+		}
+		visibleOptions = optionLines[start:end]
+
+		// Add scroll indicators
+		hintScrollStyle := lipgloss.NewStyle().Foreground(colorDim)
+		if start > 0 {
+			visibleOptions = append([]string{hintScrollStyle.Render("  ▲ more above")}, visibleOptions...)
+		}
+		if end < len(optionLines) {
+			visibleOptions = append(visibleOptions, hintScrollStyle.Render("  ▼ more below"))
+		}
+	}
+
+	var allLines []string
+	allLines = append(allLines, titleStyle.Render(p.Title))
+	allLines = append(allLines, "")
+	allLines = append(allLines, visibleOptions...)
+	allLines = append(allLines, "")
+	allLines = append(allLines,
 		hintKeyStyle.Render("↑/↓")+hintTextStyle.Render(" navigate  ")+
 			hintKeyStyle.Render("Enter")+hintTextStyle.Render(" select  ")+
 			hintKeyStyle.Render("Esc")+hintTextStyle.Render(" cancel"))
@@ -161,8 +218,14 @@ func (p PickerModal) View(termWidth int) string {
 	contentWidth := max(20, boxWidth-6)
 
 	var fitted []string
-	for _, line := range lines {
+	for _, line := range allLines {
 		fitted = append(fitted, lipgloss.NewStyle().MaxWidth(contentWidth).Render(line))
+	}
+
+	// Hard-cap height to prevent any overflow past the terminal
+	maxBoxHeight := termHeight - 2
+	if maxBoxHeight < 10 {
+		maxBoxHeight = 10
 	}
 
 	box := lipgloss.NewStyle().
@@ -171,6 +234,7 @@ func (p PickerModal) View(termWidth int) string {
 		Foreground(colorText).
 		Padding(1, 2).
 		Width(boxWidth).
+		MaxHeight(maxBoxHeight).
 		Render(strings.Join(fitted, "\n"))
 
 	// Center horizontally

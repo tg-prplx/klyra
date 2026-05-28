@@ -130,7 +130,7 @@ func (f *FeaturesModal) GetValue(name string) string {
 }
 
 // View renders the features modal.
-func (f FeaturesModal) View(termWidth, termHeight int) string {
+func (f *FeaturesModal) View(termWidth, termHeight int) string {
 	headerStyle := lipgloss.NewStyle().
 		Foreground(colorBrand).
 		Bold(true)
@@ -232,7 +232,6 @@ func (f FeaturesModal) View(termWidth, termHeight int) string {
 
 	hintScrollStyle := lipgloss.NewStyle().Foreground(colorDim)
 
-	// Apply scrolling — leave room for border + padding + header chrome
 	visibleMax := f.MaxVisible
 	if termHeight > 0 {
 		visibleMax = termHeight - 10
@@ -240,6 +239,7 @@ func (f FeaturesModal) View(termWidth, termHeight int) string {
 			visibleMax = 10
 		}
 	}
+	f.MaxVisible = visibleMax
 
 	visibleLines := allLines
 	if len(allLines) > visibleMax {

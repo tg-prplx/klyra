@@ -362,7 +362,7 @@ func (s *SettingsModal) setExpanded(section settingsSection, expanded bool) {
 }
 
 // View renders the settings modal.
-func (s SettingsModal) View(termWidth, termHeight int) string {
+func (s *SettingsModal) View(termWidth, termHeight int) string {
 	sectionStyle := lipgloss.NewStyle().
 		Foreground(colorAmber).
 		Bold(true)
@@ -519,7 +519,6 @@ func (s SettingsModal) View(termWidth, termHeight int) string {
 
 	hintScrollStyle := lipgloss.NewStyle().Foreground(colorDim)
 
-	// Apply scrolling — leave room for border + padding + header chrome
 	visibleMax := s.MaxVisible
 	if termHeight > 0 {
 		visibleMax = termHeight - 10
@@ -527,6 +526,7 @@ func (s SettingsModal) View(termWidth, termHeight int) string {
 			visibleMax = 10
 		}
 	}
+	s.MaxVisible = visibleMax
 
 	visibleLines := allLines
 	if len(allLines) > visibleMax {
@@ -608,7 +608,7 @@ func maskKey(key string) string {
 	return key[:3] + strings.Repeat("•", len(key)-6) + key[len(key)-3:]
 }
 
-func sectionSummary(s SettingsModal, section settingsSection) string {
+func sectionSummary(s *SettingsModal, section settingsSection) string {
 	style := lipgloss.NewStyle().Foreground(colorDim)
 	count := 0
 	preview := []string{}

@@ -1475,7 +1475,7 @@ func (m Model) View() string {
 	switch m.activeModal {
 	case modalPicker:
 		if m.pickerModal != nil {
-			body = centerOverlay(m.width, m.viewport.Height, m.pickerModal.View(m.width))
+			body = centerOverlay(m.width, m.viewport.Height, m.pickerModal.View(m.width, m.viewport.Height))
 		}
 	case modalHelp:
 		if m.helpModal != nil {

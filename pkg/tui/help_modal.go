@@ -90,7 +90,7 @@ func (h *HelpModal) ScrollDown() {
 	}
 }
 
-func (h HelpModal) View(termWidth, termHeight int) string {
+func (h *HelpModal) View(termWidth, termHeight int) string {
 	catTitleStyle := lipgloss.NewStyle().
 		Foreground(colorBrand).
 		Bold(true).
