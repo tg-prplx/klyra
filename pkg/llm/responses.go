@@ -12,12 +12,14 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type ResponsesProvider struct {
 	apiKey      string
 	baseURL     string
 	client      *http.Client
+	retry       openAIRetryPolicy
 	strictTools bool
 }
 
@@ -30,9 +32,15 @@ func NewResponsesProvider(apiKey, baseURL string) (*ResponsesProvider, error) {
 	}
 	baseURL = normalizeOpenAICompatibleBaseURL(baseURL)
 	return &ResponsesProvider{
-		apiKey:      apiKey,
-		baseURL:     baseURL,
-		client:      &http.Client{Timeout: 0},
+		apiKey:  apiKey,
+		baseURL: baseURL,
+		client:  &http.Client{Timeout: 0},
+		retry: openAIRetryPolicy{
+			MaxAttempts: 3,
+			Backoff: func(attempt int) time.Duration {
+				return time.Duration(attempt) * 200 * time.Millisecond
+			},
+		},
 		strictTools: responsesStrictTools(baseURL),
 	}, nil
 }
@@ -53,23 +61,14 @@ func (p *ResponsesProvider) Complete(ctx context.Context, req Request) (Response
 		return Response{}, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/responses", bytes.NewReader(body))
-	if err != nil {
-		return Response{}, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := p.client.Do(httpReq)
+	httpResp, err := p.doResponses(ctx, body, false)
 	if err != nil {
 		return Response{}, err
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		var apiErr map[string]any
-		_ = json.NewDecoder(httpResp.Body).Decode(&apiErr)
-		return Response{}, fmt.Errorf("responses API returned %s: %v", httpResp.Status, apiErr)
+		return Response{}, p.decodeResponsesError(httpResp)
 	}
 
 	var decoded responsesResponse
@@ -90,27 +89,84 @@ func (p *ResponsesProvider) Stream(ctx context.Context, req Request, handler Str
 		return Response{}, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/responses", bytes.NewReader(body))
-	if err != nil {
-		return Response{}, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-
-	httpResp, err := p.client.Do(httpReq)
+	httpResp, err := p.doResponses(ctx, body, true)
 	if err != nil {
 		return Response{}, err
 	}
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		var apiErr map[string]any
-		_ = json.NewDecoder(httpResp.Body).Decode(&apiErr)
-		return Response{}, fmt.Errorf("responses API returned %s: %v", httpResp.Status, apiErr)
+		return Response{}, p.decodeResponsesError(httpResp)
 	}
 
 	return readResponsesStream(httpResp.Body, handler)
+}
+
+func (p *ResponsesProvider) doResponses(ctx context.Context, body []byte, stream bool) (*http.Response, error) {
+	attempts := p.retry.MaxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/responses", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+		httpReq.Header.Set("Content-Type", "application/json")
+		if stream {
+			httpReq.Header.Set("Accept", "text/event-stream")
+		}
+		httpResp, err := p.client.Do(httpReq)
+		if err != nil {
+			lastErr = err
+			if attempt < attempts && isTransientOpenAIError(err) {
+				if waitErr := p.sleepBeforeResponsesRetry(ctx, attempt); waitErr != nil {
+					return nil, waitErr
+				}
+				continue
+			}
+			return nil, err
+		}
+		if isRetryableOpenAIStatus(httpResp.StatusCode) && attempt < attempts {
+			drainAndClose(httpResp.Body)
+			if waitErr := p.sleepBeforeResponsesRetry(ctx, attempt); waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+		return httpResp, nil
+	}
+	return nil, lastErr
+}
+
+func (p *ResponsesProvider) sleepBeforeResponsesRetry(ctx context.Context, attempt int) error {
+	backoff := p.retry.Backoff
+	if backoff == nil {
+		backoff = func(attempt int) time.Duration { return time.Duration(attempt) * 200 * time.Millisecond }
+	}
+	timer := time.NewTimer(backoff(attempt))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (p *ResponsesProvider) decodeResponsesError(httpResp *http.Response) error {
+	data, _ := io.ReadAll(io.LimitReader(httpResp.Body, 16*1024))
+	body := strings.TrimSpace(string(data))
+	if body == "" {
+		return fmt.Errorf("responses API returned %s with empty body", httpResp.Status)
+	}
+	var apiErr map[string]any
+	if err := json.Unmarshal(data, &apiErr); err == nil && len(apiErr) > 0 {
+		return fmt.Errorf("responses API returned %s: %v", httpResp.Status, apiErr)
+	}
+	return fmt.Errorf("responses API returned %s: %s", httpResp.Status, body)
 }
 
 func (p *ResponsesProvider) newResponsesRequest(req Request, stream bool) responsesRequest {

@@ -754,6 +754,29 @@ func TestAgentModeShapesVisibleTools(t *testing.T) {
 	}
 }
 
+func TestAgentFallsBackToNonStreamWhenStreamFailsBeforeOutput(t *testing.T) {
+	provider := &failingStreamProvider{
+		completeResponse: llm.Response{Content: "fallback answer"},
+		streamErr:        fmt.Errorf("responses API returned 502 Bad Gateway with empty body"),
+	}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Output:   io.Discard,
+		Stream:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.RunConversation(context.Background(), nil, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Final != "fallback answer" || provider.completeCalls != 1 || provider.streamCalls != 1 {
+		t.Fatalf("expected non-stream fallback, result=%+v provider=%+v", result, provider)
+	}
+}
+
 func hasToolSpecName(specs []llm.ToolSpec, name string) bool {
 	for _, spec := range specs {
 		if spec.Name == name {
@@ -772,6 +795,13 @@ type streamedProvider struct {
 	response  llm.Response
 	deltas    []string
 	reasoning []string
+}
+
+type failingStreamProvider struct {
+	completeResponse llm.Response
+	streamErr        error
+	completeCalls    int
+	streamCalls      int
 }
 
 type failingTool struct {
@@ -808,6 +838,16 @@ func (p *streamedProvider) Stream(_ context.Context, _ llm.Request, handler llm.
 		}
 	}
 	return p.response, nil
+}
+
+func (p *failingStreamProvider) Complete(_ context.Context, _ llm.Request) (llm.Response, error) {
+	p.completeCalls++
+	return p.completeResponse, nil
+}
+
+func (p *failingStreamProvider) Stream(_ context.Context, _ llm.Request, _ llm.StreamHandler) (llm.Response, error) {
+	p.streamCalls++
+	return llm.Response{}, p.streamErr
 }
 
 func (p *scriptedProvider) Complete(_ context.Context, req llm.Request) (llm.Response, error) {

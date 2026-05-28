@@ -392,6 +392,13 @@ func (a *Agent) complete(ctx context.Context, req llm.Request) (llm.Response, bo
 	if streamStarted && a.cfg.StreamHandler == nil {
 		fmt.Fprintln(a.cfg.Output)
 	}
+	if err != nil && !streamStarted && !hasLLMResponsePayload(resp) {
+		fallback, fallbackErr := a.cfg.Provider.Complete(ctx, req)
+		if fallbackErr == nil {
+			return fallback, false, nil
+		}
+		return resp, streamStarted, fmt.Errorf("%w; non-stream fallback also failed: %v", err, fallbackErr)
+	}
 	if reasoning.Len() > 0 {
 		reasoningText := reasoning.String()
 		if strings.TrimSpace(resp.Content) == "" && len(resp.ToolCalls) == 0 {
@@ -407,6 +414,10 @@ func (a *Agent) complete(ctx context.Context, req llm.Request) (llm.Response, bo
 		}
 	}
 	return resp, streamStarted, err
+}
+
+func hasLLMResponsePayload(resp llm.Response) bool {
+	return strings.TrimSpace(resp.Content) != "" || len(resp.ToolCalls) > 0 || resp.ID != "" || resp.Usage.TotalTokens > 0
 }
 
 func (a *Agent) emitStreamEvent(event llm.StreamEvent) error {

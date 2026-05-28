@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResponsesProviderParsesFunctionCallsAndUsage(t *testing.T) {
@@ -84,6 +85,64 @@ func TestResponsesProviderParsesFunctionCallsAndUsage(t *testing.T) {
 	}
 	if resp.Usage.CachedTokens != 40 || resp.Usage.ReasoningTokens != 5 || resp.Usage.TotalTokens != 112 {
 		t.Fatalf("usage was not parsed: %+v", resp.Usage)
+	}
+}
+
+func TestResponsesProviderRetriesTransientStatus(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id": "resp_retry",
+			"output": [{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type":"output_text","text":"ok"}]
+			}],
+			"usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+		}`))
+	}))
+	defer server.Close()
+
+	provider, err := NewResponsesProvider("test-key", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.retry.Backoff = func(int) time.Duration { return 0 }
+	resp, err := provider.Complete(context.Background(), Request{
+		Model:    "gpt-test",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || resp.Content != "ok" {
+		t.Fatalf("expected retry success, attempts=%d resp=%+v", attempts, resp)
+	}
+}
+
+func TestResponsesProviderFormatsEmptyGatewayError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	provider, err := NewResponsesProvider("test-key", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.retry.MaxAttempts = 1
+	_, err = provider.Complete(context.Background(), Request{
+		Model:    "gpt-test",
+		Messages: []Message{{Role: RoleUser, Content: "hello"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "empty body") || strings.Contains(err.Error(), "map[]") {
+		t.Fatalf("expected useful empty-body error, got %v", err)
 	}
 }
 
