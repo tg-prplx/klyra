@@ -1,4 +1,5 @@
-<img width="1440" height="850" alt="image" src="https://github.com/user-attachments/assets/251023f8-2460-48f3-93be-1a4f8ff464a9" />
+<img width="1440" height="852" alt="image" src="https://github.com/user-attachments/assets/be5bbfaf-616e-4d41-a43c-ba210822461e" />
+
 
 
 # Klyra
