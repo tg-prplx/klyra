@@ -159,16 +159,14 @@ func (p PickerModal) View(termWidth, termHeight int) string {
 
 	visibleOptions := optionLines
 	if len(optionLines) > visibleMax {
-		end := p.Scroll + visibleMax
+		start := p.Scroll
+		end := start + visibleMax
 		if end > len(optionLines) {
 			end = len(optionLines)
-		}
-		start := p.Scroll
-		if start >= len(optionLines) {
-			start = len(optionLines) - 1
-		}
-		if start < 0 {
-			start = 0
+			start = end - visibleMax
+			if start < 0 {
+				start = 0
+			}
 		}
 		visibleOptions = optionLines[start:end]
 
@@ -224,8 +222,11 @@ func (p PickerModal) View(termWidth, termHeight int) string {
 
 	// Hard-cap height to prevent any overflow past the terminal
 	maxBoxHeight := termHeight - 2
-	if maxBoxHeight < 10 {
-		maxBoxHeight = 10
+	if maxBoxHeight < 4 {
+		maxBoxHeight = 4
+	}
+	if maxBoxHeight > termHeight {
+		maxBoxHeight = termHeight
 	}
 
 	box := lipgloss.NewStyle().

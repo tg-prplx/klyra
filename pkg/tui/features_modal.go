@@ -235,24 +235,22 @@ func (f *FeaturesModal) View(termWidth, termHeight int) string {
 	visibleMax := f.MaxVisible
 	if termHeight > 0 {
 		visibleMax = termHeight - 10
-		if visibleMax < 10 {
-			visibleMax = 10
+		if visibleMax < 4 {
+			visibleMax = 4
 		}
 	}
 	f.MaxVisible = visibleMax
 
 	visibleLines := allLines
 	if len(allLines) > visibleMax {
-		end := f.Scroll + visibleMax
+		start := f.Scroll
+		end := start + visibleMax
 		if end > len(allLines) {
 			end = len(allLines)
-		}
-		start := f.Scroll
-		if start >= len(allLines) {
-			start = len(allLines) - 1
-		}
-		if start < 0 {
-			start = 0
+			start = end - visibleMax
+			if start < 0 {
+				start = 0
+			}
 		}
 		visibleLines = allLines[start:end]
 
@@ -290,8 +288,11 @@ func (f *FeaturesModal) View(termWidth, termHeight int) string {
 
 	// Hard-cap height to prevent any overflow past the terminal
 	maxBoxHeight := termHeight - 2
-	if maxBoxHeight < 14 {
-		maxBoxHeight = 14
+	if maxBoxHeight < 4 {
+		maxBoxHeight = 4
+	}
+	if maxBoxHeight > termHeight {
+		maxBoxHeight = termHeight
 	}
 
 	box := lipgloss.NewStyle().
