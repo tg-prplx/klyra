@@ -1547,10 +1547,10 @@ func (m Model) renderAutocomplete() (string, int) {
 		BorderForeground(colorMuted).
 		Render(content)
 
-	// Indent the entire block by 4 spaces to align with where user typing begins
+	// Indent the entire block by 2 spaces
 	boxLines := strings.Split(box, "\n")
 	for i, line := range boxLines {
-		boxLines[i] = "    " + line
+		boxLines[i] = "  " + line
 	}
 	indentedBox := strings.Join(boxLines, "\n")
 
