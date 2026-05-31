@@ -14,7 +14,7 @@ type Guide struct{}
 func (Guide) Spec() llm.ToolSpec {
 	return llm.ToolSpec{
 		Name:        "guide",
-		Description: "Return a compact task-specific workflow before doing unfamiliar work. Use this instead of broad repo/session exploration when unsure.",
+		Description: "Return a compact task-specific workflow before unfamiliar work. Call at most once per user request, then act with a task tool or answer.",
 		Parameters: objectSchema(map[string]any{
 			"query": stringProperty("Short description of the task or workflow guidance needed."),
 		}, "query"),

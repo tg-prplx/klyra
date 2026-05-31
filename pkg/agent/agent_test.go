@@ -101,6 +101,85 @@ func TestAgentSuppressesRepeatedFailedToolCall(t *testing.T) {
 	}
 }
 
+func TestAgentSuppressesRepeatedGuideAndAllowsRecovery(t *testing.T) {
+	provider := &scriptedProvider{
+		responses: []llm.Response{
+			{Content: "need guidance", ToolCalls: []llm.ToolCall{{
+				ID:        "call-1",
+				Name:      "guide",
+				Arguments: map[string]any{"query": "fix the parser"},
+			}}},
+			{Content: "asking again", ToolCalls: []llm.ToolCall{{
+				ID:        "call-2",
+				Name:      "guide",
+				Arguments: map[string]any{"query": "fix the parser"},
+			}}},
+			{Content: "done"},
+		},
+	}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewDefaultRegistry(),
+		Output:   io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := agent.RunConversation(context.Background(), nil, "fix the parser")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Final != "done" {
+		t.Fatalf("unexpected final response: %q", result.Final)
+	}
+	var suppressed bool
+	for _, msg := range result.Messages {
+		if msg.Role == llm.RoleTool && strings.Contains(msg.Content, "repeated guide call suppressed") {
+			suppressed = true
+		}
+	}
+	if !suppressed {
+		t.Fatalf("expected repeated guide suppression observation: %+v", result.Messages)
+	}
+}
+
+func TestAgentStopsRepeatedGuideLoopEarly(t *testing.T) {
+	guideCall := func(id string) llm.Response {
+		return llm.Response{Content: "need guidance", ToolCalls: []llm.ToolCall{{
+			ID:        id,
+			Name:      "guide",
+			Arguments: map[string]any{"query": "fix the parser"},
+		}}}
+	}
+	provider := &scriptedProvider{
+		responses: []llm.Response{
+			guideCall("call-1"),
+			guideCall("call-2"),
+			guideCall("call-3"),
+		},
+	}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewDefaultRegistry(),
+		Output:   io.Discard,
+		MaxSteps: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = agent.RunConversation(context.Background(), nil, "fix the parser")
+	if err == nil || !strings.Contains(err.Error(), "repeated guide loop") {
+		t.Fatalf("expected repeated guide loop error, got %v", err)
+	}
+	if len(provider.requests) != 3 {
+		t.Fatalf("expected loop to stop after three provider calls, got %d", len(provider.requests))
+	}
+}
+
 func TestAgentAssignsMissingToolCallID(t *testing.T) {
 	provider := &scriptedProvider{
 		responses: []llm.Response{

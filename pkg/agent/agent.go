@@ -227,6 +227,8 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	var lastUsage llm.Usage
 	var lastDebug ContextDebug
 	failedToolCalls := map[string]tools.Result{}
+	guideCompleted := false
+	repeatedGuideCalls := 0
 	for step := 1; step <= a.cfg.MaxSteps; step++ {
 		specs := a.cfg.Tools.SpecsForTaskMode(task, a.cfg.Mode, a.cfg.ContextFiles)
 		lastDebug = a.contextDebug(specs)
@@ -276,6 +278,21 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 				return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, err
 			}
 			signature := toolCallSignature(call)
+			if call.Name == "guide" && guideCompleted {
+				repeatedGuideCalls++
+				err := fmt.Errorf("repeated guide call suppressed; guidance was already provided for this run; use a task tool or answer the user")
+				observation := toolObservation(call, tools.Result{Output: err.Error()}, err)
+				window.Add(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: observation})
+				fmt.Fprintf(a.cfg.Output, "tool error: %v\n", err)
+				if progressErr := a.emitToolProgress(ToolProgressEvent{Phase: "error", Tool: call.Name, ID: call.ID, Args: call.Arguments, Output: err.Error(), Error: err.Error()}); progressErr != nil {
+					return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, progressErr
+				}
+				if repeatedGuideCalls >= 2 {
+					a.printUsage(lastUsage)
+					return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, fmt.Errorf("agent stopped after repeated guide loop")
+				}
+				continue
+			}
 			if previous, repeated := failedToolCalls[signature]; repeated {
 				err := fmt.Errorf("repeated failed tool call suppressed; previous output: %s; change strategy or use a different focused tool", strings.TrimSpace(previous.Output))
 				observation := toolObservation(call, tools.Result{Output: err.Error()}, err)
@@ -301,6 +318,9 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			result, err := a.cfg.Tools.RunWithPolicy(ctx, a.cfg.CWD, a.cfg.Sandbox, a.cfg.Mode, a.cfg.ContextFiles, call)
 			observation := toolObservation(call, result, err)
 			window.Add(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: observation})
+			if call.Name == "guide" && err == nil {
+				guideCompleted = true
+			}
 			if err != nil {
 				failedToolCalls[signature] = result
 				fmt.Fprintf(a.cfg.Output, "tool error: %v\n", err)
@@ -561,6 +581,7 @@ General principles:
 - Always prefer using specific built-in tools (such as read_file, create_file, replace_lines, search, etc.) over executing raw shell commands via bash. Never use bash for tasks that can be performed with built-in tools.
 - Use web_search/fetch_url for current or external internet facts, and cite URLs in the answer.
 - Treat mcp_* tools as external capabilities: use them only when their name/description fits the task.
+- Call guide at most once per user request. After it returns, follow the workflow with a task tool or answer the user.
 - After any tool failure, read the observation, change strategy once, and do not repeat the same failed call with the same arguments.
 - Answer clearly, concisely, and with actionable detail.
 
