@@ -8,32 +8,12 @@ import (
 	"klyra/pkg/llm"
 )
 
-func TestSpecsForTaskPrunesWriteToolsForInspection(t *testing.T) {
-	specs := NewDefaultRegistry().SpecsForTask("inspect project")
-	if hasSpec(specs, "write_file") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_symbol") {
-		t.Fatalf("inspection should not include edit tools: %+v", specs)
-	}
-	if !hasSpec(specs, "project_map") || !hasSpec(specs, "file_outline") || !hasSpec(specs, "read_symbol") {
-		t.Fatalf("inspection should include orientation tools: %+v", specs)
-	}
-	if hasSpec(specs, "read_file") {
-		t.Fatalf("inspection should not expose read_file before a specific path is known: %+v", specs)
-	}
-	if !hasSpec(specs, "guide") {
-		t.Fatalf("inspection should include dynamic guide tool: %+v", specs)
-	}
-}
-
-func TestSpecsForTaskIncludesEditToolsForImplementation(t *testing.T) {
-	specs := NewDefaultRegistry().SpecsForTask("реализуй поддержку go tests")
-	if hasSpec(specs, "write_file") {
-		t.Fatalf("implementation should hide primitive full-file writer: %+v", specs)
-	}
-	if !hasSpec(specs, "guide") || !hasSpec(specs, "project_map") || !hasSpec(specs, "search") || !hasSpec(specs, "bash") {
-		t.Fatalf("implementation should start with orientation and verification tools: %+v", specs)
-	}
-	if hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "replace_symbol") || hasSpec(specs, "read_file") {
-		t.Fatalf("implementation without path/cart should not expose heavy read/write tools: %+v", specs)
+func TestTaskTextDoesNotGuessCapabilities(t *testing.T) {
+	for _, task := range []string{"inspect project", "реализуй поддержку go tests", "найди twitch канал furrydev2007", "составь план рефакторинга"} {
+		specs := NewDefaultRegistry().SpecsForTask(task)
+		if len(specs) != 1 || !hasSpec(specs, "discover_tools") {
+			t.Fatalf("task text should expose only capability discovery for %q: %+v", task, specs)
+		}
 	}
 }
 
@@ -68,8 +48,8 @@ func TestSpecsWithContextCartExposePatchTools(t *testing.T) {
 
 func TestSpecsForSimpleChatHidesWorkspaceTools(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForTask("привет, как дела?")
-	if len(specs) != 0 {
-		t.Fatalf("simple chat should not pay for tool schemas: %+v", specs)
+	if len(specs) != 1 || !hasSpec(specs, "discover_tools") {
+		t.Fatalf("simple chat should pay only for compact capability discovery: %+v", specs)
 	}
 }
 
@@ -84,15 +64,6 @@ func TestPlanModeExposesPlanningAndReadOnlyTools(t *testing.T) {
 		if hasSpec(specs, name) {
 			t.Fatalf("plan mode should hide %s: %+v", name, specs)
 		}
-	}
-}
-
-func TestPlanningIntentExposesUpdatePlanWithoutPollutingSimpleChat(t *testing.T) {
-	if !hasSpec(NewDefaultRegistry().SpecsForTask("составь план рефакторинга проекта"), "update_plan") {
-		t.Fatal("explicit planning intent should expose update_plan")
-	}
-	if hasSpec(NewDefaultRegistry().SpecsForTask("привет"), "update_plan") {
-		t.Fatal("simple chat should not expose update_plan")
 	}
 }
 
@@ -128,9 +99,9 @@ func TestSpecsHideLegacyWriteFile(t *testing.T) {
 }
 
 func TestSpecsForWebTaskUsesOnlyWebTools(t *testing.T) {
-	specs := NewDefaultRegistry().SpecsForTask("найди twitch канал furrydev2007")
+	specs := NewDefaultRegistry().SpecsForCapabilities("arbitrary text", "", nil, map[string]bool{CapabilityWeb: true})
 	if !hasSpec(specs, "web_search") || !hasSpec(specs, "fetch_url") || !hasSpec(specs, "guide") {
-		t.Fatalf("web task should expose web tools and guide: %+v", specs)
+		t.Fatalf("web capability should expose web tools and guide: %+v", specs)
 	}
 	if hasSpec(specs, "project_map") || hasSpec(specs, "read_file") || hasSpec(specs, "git_status") || hasSpec(specs, "bash") {
 		t.Fatalf("web task should not expose workspace tools: %+v", specs)
@@ -149,10 +120,7 @@ func TestEditModeExposesCreateFileForSkillCreationWithoutContextCart(t *testing.
 	if !hasSpec(specs, "create_file") {
 		t.Fatalf("skill creation should expose create_file even without context cart: %+v", specs)
 	}
-	if !hasSpec(specs, "guide") {
-		t.Fatalf("skill creation should expose guide: %+v", specs)
-	}
-	if hasSpec(specs, "project_map") || hasSpec(specs, "bash") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "insert_lines") {
+	if hasSpec(specs, "guide") || hasSpec(specs, "project_map") || hasSpec(specs, "bash") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "insert_lines") {
 		t.Fatalf("skill creation without context cart should expose only focused tools: %+v", specs)
 	}
 }
@@ -161,7 +129,8 @@ func TestGuideReturnsSkillCreationWorkflow(t *testing.T) {
 	result, err := Guide{}.Run(context.Background(), Invocation{
 		CWD: t.TempDir(),
 		Args: map[string]any{
-			"query": "напиши сам себе скилл для github issue summary",
+			"query":    "напиши сам себе скилл для github issue summary",
+			"workflow": "skill",
 		},
 	})
 	if err != nil {

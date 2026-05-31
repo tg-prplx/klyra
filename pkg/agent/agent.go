@@ -170,9 +170,6 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	if task == "" {
 		return RunResult{}, fmt.Errorf("task cannot be empty")
 	}
-	if strings.EqualFold(strings.TrimSpace(a.cfg.Mode), "inspect") && tools.TaskLooksLikeWriteRequest(task) {
-		return RunResult{}, fmt.Errorf("mode inspect blocks write-like requests; switch to edit mode with /mode edit or ask for inspection only")
-	}
 
 	scopedInstructions, scopedErr := instructions.LoadScoped(a.cfg.CWD, task, a.cfg.ContextFiles, a.cfg.MaxInstructions/2)
 	var skillSet skills.Result
@@ -232,11 +229,12 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	successfulReadCalls := map[string]tools.Result{}
 	repeatedReadCalls := map[string]int{}
 	successfulPlanCalls := map[string]tools.Result{}
+	runCapabilities := map[string]bool{}
 	guideCompleted := false
 	repeatedGuideCalls := 0
 	repeatedPlanCalls := 0
 	for step := 1; step <= a.cfg.MaxSteps; step++ {
-		specs := a.cfg.Tools.SpecsForTaskMode(task, a.cfg.Mode, a.cfg.ContextFiles)
+		specs := a.cfg.Tools.SpecsForCapabilities(task, a.cfg.Mode, a.cfg.ContextFiles, runCapabilities)
 		lastDebug = a.contextDebug(specs)
 		if scopedErr != nil {
 			lastDebug.Risks = append(lastDebug.Risks, "scoped recipes failed: "+scopedErr.Error())
@@ -251,7 +249,7 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			lastDebug.CockpitTokens = cockpitSnapshot.EstimatedTokens
 		}
 		req := llm.Request{
-			Model:           router.SelectModel(a.cfg.Model, a.cfg.ModelRoutes, task),
+			Model:           router.SelectModel(a.cfg.Model, a.cfg.ModelRoutes, a.cfg.Mode),
 			Messages:        window.Messages(),
 			Tools:           specs,
 			MaxOutputTokens: a.cfg.MaxOutput,
@@ -364,6 +362,15 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			}
 			if call.Name == "update_plan" && err == nil {
 				successfulPlanCalls[signature] = result
+			}
+			if call.Name == "discover_tools" && err == nil {
+				capabilities, capabilityErr := tools.RequestedCapabilities(call.Arguments)
+				if capabilityErr != nil {
+					return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, capabilityErr
+				}
+				for _, capability := range capabilities {
+					runCapabilities[capability] = true
+				}
 			}
 			if err == nil && tools.HasSideEffects(call.Name) {
 				successfulReadCalls = map[string]tools.Result{}
@@ -633,12 +640,13 @@ General principles:
 - Treat mcp_* tools as external capabilities: use them only when their name/description fits the task.
 - Call guide at most once per user request. After it returns, follow the workflow with a task tool or answer the user.
 - Use update_plan for non-trivial multi-step work only. Keep it short and update it only when status or scope changes.
+- If the needed task tool is not visible, call discover_tools once with the smallest useful capability groups, then use the newly unlocked tools.
 - After any tool failure, read the observation, change strategy once, and do not repeat the same failed call with the same arguments.
 - Answer clearly, concisely, and with actionable detail.
 
 When working with code and files:
 - If the user asks to create a new known file, call create_file directly. Do not run project_map/search/bash first just to learn how to create a file.
-- If the user asks to create a new project or application from scratch, create the first concrete file directly. If project_map shows an empty workspace, do not call it again.
+- If the user asks to create something from scratch, create the first concrete file directly. If project_map shows an empty workspace, do not call it again.
 - For skill creation, call guide if unsure, then create .klyra/skills/<name>.md or .klyra/skills/<name>/SKILL.md. Supporting files must stay inside that skill directory. Stop after creating the requested skill.
 - First build a small context slice only when existing code must be understood: project_map/search -> file_outline/read_symbol -> short read_file ranges.
 - Keep token use low: prefer guide, symbols, line ranges, repo-map facts, and focused diffs over whole files.

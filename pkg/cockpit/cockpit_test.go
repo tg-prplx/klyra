@@ -66,6 +66,35 @@ func TestBuildDisabledReturnsDisabledSnapshot(t *testing.T) {
 	}
 }
 
+func TestNegativeContextDoesNotHideMigrationsByName(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "db/migrations/202001010001_create_users.sql", "create table users(id integer);\n")
+	if negative := detectNegativeContext(root, 10); strings.Contains(negative, "202001010001_create_users.sql") {
+		t.Fatalf("migration should not be withheld by a domain-specific filename heuristic:\n%s", negative)
+	}
+}
+
+func TestRetrievalIncludesUnknownTextExtensionsButSkipsSecrets(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "src/widget.zig", "pub fn frobnicate_widget() void {}\n")
+	writeFile(t, root, ".env", "FROBNICATE_WIDGET_SECRET=do-not-read\n")
+
+	cart, warnings := buildRetrievalCart(context.Background(), retrievalConfig{
+		MaxTokens: 300,
+		MaxChunks: 3,
+		MaxFiles:  10,
+	}, root, "frobnicate_widget")
+	if len(warnings) > 0 {
+		t.Fatalf("unexpected warnings: %+v", warnings)
+	}
+	if !strings.Contains(cart, "src/widget.zig") {
+		t.Fatalf("unknown text extension should be retrievable:\n%s", cart)
+	}
+	if strings.Contains(cart, "do-not-read") || strings.Contains(cart, ".env") {
+		t.Fatalf("secret files must stay outside retrieval:\n%s", cart)
+	}
+}
+
 func TestBuildIncludesRetrievalCartWithBudgetAndDenyList(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "pkg/auth/login.go", `package auth

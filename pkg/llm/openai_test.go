@@ -84,6 +84,15 @@ func TestOpenAIProviderTreatsPrivateIPEndpointsAsLocal(t *testing.T) {
 	}
 }
 
+func TestOpenAIProviderDoesNotGuessLocalEndpointFromHostnameSubstring(t *testing.T) {
+	if isLocalOpenAICompatibleBaseURL("https://api.local-models.example/v1") {
+		t.Fatal("public hostname containing local should not be treated as a local endpoint")
+	}
+	if !isLocalOpenAICompatibleBaseURL("http://models.localhost:1234/v1") {
+		t.Fatal("localhost subdomain should be treated as a local endpoint")
+	}
+}
+
 func TestOpenAIProviderNormalizesRootEndpointToV1(t *testing.T) {
 	var capturedPath string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

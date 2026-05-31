@@ -124,7 +124,7 @@ func TestFetchURLFallsBackWhenNoFocusQuery(t *testing.T) {
 }
 
 func TestWebToolsExposedForInternetTasks(t *testing.T) {
-	specs := NewDefaultRegistry().SpecsForTask("найди актуальную информацию в интернете")
+	specs := NewDefaultRegistry().SpecsForCapabilities("arbitrary text", "", nil, map[string]bool{CapabilityWeb: true})
 	if !hasToolSpec(specs, "web_search") || !hasToolSpec(specs, "fetch_url") {
 		t.Fatalf("expected web tools, got %+v", specs)
 	}

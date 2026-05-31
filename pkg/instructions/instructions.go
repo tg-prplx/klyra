@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const DefaultMaxBytes = 12_000
@@ -223,9 +224,15 @@ func scopedTerms(focus string, contextFiles []string) map[string]string {
 		if _, ok := terms[term]; !ok {
 			terms[term] = reason
 		}
+		if len(term) > 4 && strings.HasSuffix(term, "s") {
+			singular := strings.TrimSuffix(term, "s")
+			if _, ok := terms[singular]; !ok {
+				terms[singular] = reason
+			}
+		}
 	}
 	for _, raw := range strings.FieldsFunc(strings.ToLower(focus), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '_'
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
 	}) {
 		add(raw, "task mentions "+raw)
 	}
@@ -233,30 +240,9 @@ func scopedTerms(focus string, contextFiles []string) map[string]string {
 		path := strings.ToLower(filepath.ToSlash(file))
 		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		for _, part := range strings.FieldsFunc(path+" "+base, func(r rune) bool {
-			return r == '/' || r == '-' || r == '_' || r == '.' || r == ' '
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 		}) {
 			add(part, "context path matches "+file)
-		}
-		switch filepath.Ext(path) {
-		case ".tsx", ".jsx", ".css", ".scss", ".vue", ".svelte":
-			add("frontend", "frontend file "+file)
-			add("react", "frontend file "+file)
-			add("style", "frontend file "+file)
-		case ".sql":
-			add("database", "database file "+file)
-			add("migration", "database file "+file)
-		}
-		if strings.Contains(path, "migration") || strings.Contains(path, "schema") {
-			add("migration", "migration/schema path "+file)
-			add("database", "migration/schema path "+file)
-		}
-		if strings.Contains(path, "test") || strings.Contains(path, "spec") {
-			add("testing", "test/spec path "+file)
-			add("test", "test/spec path "+file)
-		}
-		if strings.Contains(path, "api") || strings.Contains(path, "handler") || strings.Contains(path, "route") {
-			add("backend", "backend/api path "+file)
-			add("api", "backend/api path "+file)
 		}
 	}
 	return terms

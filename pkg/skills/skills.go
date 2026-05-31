@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const DefaultMaxBytes = 6000
@@ -200,9 +201,15 @@ func matchTerms(focus string, contextFiles []string) map[string]string {
 		if _, ok := terms[term]; !ok {
 			terms[term] = reason
 		}
+		if len(term) > 4 && strings.HasSuffix(term, "s") {
+			singular := strings.TrimSuffix(term, "s")
+			if _, ok := terms[singular]; !ok {
+				terms[singular] = reason
+			}
+		}
 	}
 	for _, raw := range strings.FieldsFunc(strings.ToLower(focus), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '_'
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_'
 	}) {
 		add(raw, "task mentions "+raw)
 	}
@@ -210,19 +217,9 @@ func matchTerms(focus string, contextFiles []string) map[string]string {
 		path := strings.ToLower(filepath.ToSlash(file))
 		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		for _, part := range strings.FieldsFunc(path+" "+base, func(r rune) bool {
-			return r == '/' || r == '-' || r == '_' || r == '.' || r == ' '
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 		}) {
 			add(part, "context path matches "+file)
-		}
-		switch filepath.Ext(path) {
-		case ".tsx", ".jsx", ".css", ".scss", ".vue", ".svelte":
-			add("frontend", "frontend file "+file)
-			add("style", "frontend file "+file)
-		case ".sql":
-			add("database", "database file "+file)
-			add("migration", "database file "+file)
-		case ".go", ".rs", ".py", ".ts", ".js":
-			add("code", "source file "+file)
 		}
 	}
 	return terms

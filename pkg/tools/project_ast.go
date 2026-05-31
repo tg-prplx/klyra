@@ -267,9 +267,6 @@ func symbolScore(nodeType, symbol string) int {
 	if strings.Contains(nodeType, "class") || strings.Contains(nodeType, "interface") || strings.Contains(nodeType, "struct") {
 		score += 4
 	}
-	if strings.Contains(strings.ToLower(symbol), "test") {
-		score += 2
-	}
 	return score
 }
 
@@ -340,16 +337,6 @@ func treeSitterLanguageForPath(path string) (*sitter.Language, string) {
 		return dockerfile.GetLanguage(), "dockerfile"
 	}
 	return nil, ""
-}
-
-func isCodeExtension(ext string) bool {
-	ext = strings.ToLower(ext)
-	switch ext {
-	case ".go", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".py", ".rs", ".java", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".rb", ".php", ".cs", ".kt", ".kts", ".swift", ".lua", ".sh", ".bash", ".zsh", ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".svelte":
-		return true
-	default:
-		return false
-	}
 }
 
 var identCleaner = regexp.MustCompile(`[^A-Za-z0-9_.$:#<>-]+`)

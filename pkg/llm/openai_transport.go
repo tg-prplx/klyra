@@ -156,10 +156,6 @@ func (t openAIChatTransport) formatTransportError(err error) error {
 }
 
 func isLocalOpenAICompatibleBaseURL(raw string) bool {
-	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "localhost") || strings.Contains(lower, "ollama") || strings.Contains(lower, "local") {
-		return true
-	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return false
@@ -167,6 +163,9 @@ func isLocalOpenAICompatibleBaseURL(raw string) bool {
 	host := parsed.Hostname()
 	if host == "" {
 		return false
+	}
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {

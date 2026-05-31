@@ -150,22 +150,11 @@ func importantFiles(files []string, limit int, focus string) []string {
 	}
 	focusTerms := queryTerms(focus)
 	score := func(path string) int {
-		name := strings.ToLower(filepath.Base(path))
-		dir := strings.ToLower(filepath.Dir(path))
 		lowerPath := strings.ToLower(filepath.ToSlash(path))
+		depth := strings.Count(filepath.ToSlash(filepath.Clean(path)), "/")
 		score := 0
-		switch name {
-		case "readme.md", "go.mod", "package.json", "cargo.toml", "pyproject.toml", "implementation_plan.md", "makefile":
-			score += 100
-		}
-		if strings.HasPrefix(dir, "cmd") || strings.HasPrefix(dir, "pkg") || strings.HasPrefix(dir, "src") || strings.HasPrefix(dir, "internal") {
-			score += 20
-		}
-		if strings.Contains(name, "test") {
-			score += 8
-		}
-		if isCodeExtension(filepath.Ext(name)) {
-			score += 5
+		if depth < 12 {
+			score = 12 - depth
 		}
 		for _, term := range focusTerms {
 			if strings.Contains(lowerPath, term) {

@@ -264,6 +264,8 @@ go run . --provider openai \
   run "inspect the project and propose next steps"
 ```
 
+Routing follows the explicit agent mode rather than guessing intent from task keywords: `inspect` uses the fast route, `edit`/`repair` use the edit route, and `plan`/`refactor` use the deep route.
+
 `--stream` uses Responses API SSE when available and falls back to normal completion for providers that do not support streaming.
 
 ## Context compaction
@@ -274,6 +276,7 @@ The context cockpit also builds a small retrieval cart before each task. It rank
 
 ## Implemented tools
 
+- `discover_tools`: unlocks compact capability groups (`workspace`, `edit`, `git`, `shell`, `web`, `plan`, `external`) for the current run.
 - `guide`: returns compact task-specific workflow guidance on demand, so unfamiliar work does not require injecting every playbook into the prompt.
 - `project_map`: token-budgeted repo map for low-token discovery; includes important files and AST symbols.
 - `list_files`: lists workspace files while skipping common generated directories.
@@ -290,7 +293,7 @@ The context cockpit also builds a small retrieval cart before each task. It rank
 - `bash`: runs shell commands with timeout and output compression.
 - `diff_patch`: applies unified diffs via `git apply`.
 
-The agent prunes tool schemas per task so simple chat requests pay for no tools, web requests see only `guide`/`web_search`/`fetch_url`, and workspace tools are exposed only for code, file, shell, test, or edit intent. Workspace tools are progressive: broad code tasks start with orientation tools (`guide`, `project_map`, `search`, `file_outline`, `read_symbol`), `read_file` appears only when a concrete path or context cart exists, focused edit tools appear for explicit file edits, and heavier patch/checkpoint tools require a context cart.
+The agent discloses tool schemas progressively without guessing task intent from keyword lists. A fresh run starts with compact `discover_tools`; the model requests only the capability groups needed for the task. Concrete paths, URLs, context-cart entries, and explicit agent modes act as structural shortcuts. Heavy patch/checkpoint tools still require a context cart.
 The agent can also call `policy_check` before risky shell commands; destructive shell patterns are blocked in `--approval auto`.
 
 ## Verification

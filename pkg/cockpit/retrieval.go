@@ -245,9 +245,6 @@ func scoreChunk(chunk retrievalChunk, queryTerms []string, idf map[string]float6
 		score += embeddingScore * 4.0
 		boosts = append(boosts, fmt.Sprintf("local-embedding=%.2f", embeddingScore))
 	}
-	if strings.Contains(strings.ToLower(filepath.Base(chunk.Path)), "test") {
-		score += 0.2
-	}
 	if len(matches) == 0 && len(boosts) == 0 {
 		return 0, "no lexical or AST match"
 	}
@@ -340,7 +337,7 @@ func rawEmbeddingTokens(text string) []string {
 		token := string(current)
 		current = current[:0]
 		tokenLower := strings.ToLower(token)
-		if len(tokenLower) < 2 || stopTerms[tokenLower] {
+		if len(tokenLower) < 2 {
 			return
 		}
 		tokens = append(tokens, token)
@@ -365,7 +362,7 @@ func splitIdentifierToken(token string) []string {
 		}
 		part := strings.ToLower(string(current))
 		current = current[:0]
-		if len(part) >= 2 && !stopTerms[part] {
+		if len(part) >= 2 {
 			parts = append(parts, part)
 		}
 	}
@@ -377,7 +374,7 @@ func splitIdentifierToken(token string) []string {
 	}
 	flush()
 	tokenLower := strings.ToLower(token)
-	if len(parts) == 0 && len(tokenLower) >= 2 && !stopTerms[tokenLower] {
+	if len(parts) == 0 && len(tokenLower) >= 2 {
 		parts = append(parts, tokenLower)
 	}
 	return parts
@@ -487,7 +484,7 @@ func retrievalTerms(query string) []string {
 	counts := termCounts(query)
 	terms := make([]string, 0, len(counts))
 	for term := range counts {
-		if len(term) >= 3 && !stopTerms[term] {
+		if len(term) >= 3 {
 			terms = append(terms, term)
 		}
 	}
@@ -504,7 +501,7 @@ func termCounts(text string) map[string]int {
 		}
 		term := strings.ToLower(string(current))
 		current = current[:0]
-		if len(term) < 2 || stopTerms[term] {
+		if len(term) < 2 {
 			return
 		}
 		terms[term]++
@@ -535,23 +532,11 @@ func indentSnippet(text, prefix string) string {
 }
 
 func retrievalFileScore(path string) int {
-	base := strings.ToLower(filepath.Base(path))
-	dir := strings.ToLower(filepath.Dir(path))
-	score := 0
-	if isCodeLikePath(path) {
-		score += 10
+	depth := strings.Count(filepath.ToSlash(filepath.Clean(path)), "/")
+	if depth >= 12 {
+		return 0
 	}
-	switch base {
-	case "readme.md", "go.mod", "package.json", "cargo.toml", "pyproject.toml", "implementation_plan.md", "makefile":
-		score += 20
-	}
-	if strings.HasPrefix(dir, "cmd") || strings.HasPrefix(dir, "pkg") || strings.HasPrefix(dir, "src") || strings.HasPrefix(dir, "internal") {
-		score += 8
-	}
-	if strings.Contains(base, "test") {
-		score += 3
-	}
-	return score
+	return 12 - depth
 }
 
 func retrievalSkipDir(name string) bool {
@@ -566,6 +551,11 @@ func retrievalSkipDir(name string) bool {
 func retrievalSkipPath(path string, info os.FileInfo) bool {
 	lower := strings.ToLower(filepath.ToSlash(path))
 	name := filepath.Base(lower)
+	if name == ".env" || strings.HasPrefix(name, ".env.") ||
+		strings.HasSuffix(name, ".pem") || strings.HasSuffix(name, ".key") ||
+		strings.HasSuffix(name, ".p12") || strings.HasSuffix(name, ".pfx") {
+		return true
+	}
 	switch name {
 	case "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "go.sum", "cargo.lock", "poetry.lock", "gemfile.lock":
 		return true
@@ -576,31 +566,14 @@ func retrievalSkipPath(path string, info os.FileInfo) bool {
 	if strings.Contains(lower, "__snapshots__/") || strings.Contains(name, ".generated.") || strings.Contains(name, ".gen.") {
 		return true
 	}
-	if !isCodeLikePath(path) && !isDocLikePath(path) {
+	switch filepath.Ext(name) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz", ".tar", ".mp4", ".mov", ".wasm":
 		return true
 	}
 	if info != nil && info.Size() > 256*1024 {
 		return true
 	}
 	return false
-}
-
-func isCodeLikePath(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".go", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".py", ".rs", ".java", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".rb", ".php", ".cs", ".kt", ".kts", ".swift", ".lua", ".sh", ".bash", ".zsh", ".sql", ".html", ".htm", ".css", ".scss", ".sass", ".svelte", ".yaml", ".yml", ".toml", ".json", ".md":
-		return true
-	default:
-		return false
-	}
-}
-
-func isDocLikePath(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".txt", ".md", ".rst":
-		return true
-	default:
-		return false
-	}
 }
 
 func looksBinary(data []byte) bool {
@@ -614,11 +587,4 @@ func looksBinary(data []byte) bool {
 		}
 	}
 	return false
-}
-
-var stopTerms = map[string]bool{
-	"the": true, "and": true, "for": true, "with": true, "that": true, "this": true,
-	"from": true, "into": true, "when": true, "where": true, "what": true, "why": true,
-	"как": true, "что": true, "для": true, "или": true, "это": true, "если": true,
-	"надо": true, "нужно": true, "сделай": true,
 }

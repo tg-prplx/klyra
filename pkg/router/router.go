@@ -12,25 +12,22 @@ const (
 
 type ModelRoutes map[string]string
 
-func Classify(task string) Class {
-	text := strings.ToLower(task)
-	if containsAny(text, []string{"architecture", "design", "проектирован", "архитект", "security", "безопас", "audit", "аудит", "large refactor", "deep"}) {
+func Classify(mode string) Class {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "plan", "refactor":
 		return ClassDeep
-	}
-	if containsAny(text, []string{
-		"implement", "add ", "fix", "change", "edit", "write", "refactor", "delete",
-		"реализ", "добав", "исправ", "измени", "поправ", "напиши", "удали", "рефактор",
-	}) {
+	case "edit", "repair":
 		return ClassEdit
+	default:
+		return ClassFast
 	}
-	return ClassFast
 }
 
-func SelectModel(defaultModel string, routes ModelRoutes, task string) string {
+func SelectModel(defaultModel string, routes ModelRoutes, mode string) string {
 	if routes == nil {
 		return defaultModel
 	}
-	class := string(Classify(task))
+	class := string(Classify(mode))
 	if model := strings.TrimSpace(routes[class]); model != "" {
 		return model
 	}
@@ -38,13 +35,4 @@ func SelectModel(defaultModel string, routes ModelRoutes, task string) string {
 		return model
 	}
 	return defaultModel
-}
-
-func containsAny(text string, needles []string) bool {
-	for _, needle := range needles {
-		if strings.Contains(text, needle) {
-			return true
-		}
-	}
-	return false
 }

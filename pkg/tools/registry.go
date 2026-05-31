@@ -3,9 +3,12 @@ package tools
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"klyra/pkg/llm"
 	"klyra/pkg/policy"
@@ -66,6 +69,7 @@ func (r *Registry) IsDisabled(name string) bool {
 
 func NewDefaultRegistry() *Registry {
 	return NewRegistry(
+		DiscoverTools{},
 		Guide{},
 		UpdatePlan{},
 		ProjectMap{},
@@ -115,78 +119,37 @@ func (r *Registry) SpecsForTask(task string) []llm.ToolSpec {
 }
 
 func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []llm.ToolSpec {
-	task = strings.ToLower(task)
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	writeIntent := mentionsEdit(task)
-	shellIntent := mentionsShell(task)
-	testIntent := mentionsTest(task)
-	webIntent := mentionsWeb(task)
-	planningIntent := mentionsPlanning(task)
-	explicitPathIntent := mentionsSpecificPath(task)
-	codeIntent := len(contextFiles) > 0 || writeIntent || shellIntent || testIntent || mentionsCodeWorkspace(task)
-	names := map[string]bool{}
+	return r.SpecsForCapabilities(task, mode, contextFiles, nil)
+}
 
-	if codeIntent {
-		names["guide"] = true
-		names["project_map"] = true
-		names["search"] = true
-		names["file_outline"] = true
-		names["read_symbol"] = true
-		if len(contextFiles) > 0 || explicitPathIntent {
-			names["read_file"] = true
-		}
-		if mentionsFileListing(task) {
-			names["list_files"] = true
-		}
-		if writeIntent || testIntent || mentionsGit(task) {
-			names["git_status"] = true
-		}
-		if shellIntent {
-			names["policy_check"] = true
-		}
+func (r *Registry) SpecsForCapabilities(task, mode string, contextFiles []string, capabilities map[string]bool) []llm.ToolSpec {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	explicitPathIntent := mentionsSpecificPath(task)
+	names := map[string]bool{"discover_tools": true}
+
+	if hasURL(task) {
+		capabilities = withCapability(capabilities, CapabilityWeb)
 	}
-	if mode == "plan" || planningIntent || mode == "refactor" {
-		names["update_plan"] = true
+	if len(contextFiles) > 0 || explicitPathIntent {
+		capabilities = withCapability(capabilities, CapabilityWorkspace)
 	}
-	if webIntent {
-		names["guide"] = true
-		names["web_search"] = true
-		names["fetch_url"] = true
+	if mode == "edit" && (len(contextFiles) > 0 || explicitPathIntent) {
+		capabilities = withCapability(capabilities, CapabilityEdit)
 	}
-	if mentionsGo(task) || explicitPathIntent {
-		names["read_go_symbol"] = true
-	}
-	if shellIntent || testIntent {
-		names["bash"] = true
-	}
-	if mode == "edit" && codeIntent {
+	switch mode {
+	case "plan":
+		capabilities = withCapabilities(capabilities, CapabilityWorkspace, CapabilityPlan)
+	case "inspect":
+		capabilities = withCapability(capabilities, CapabilityWorkspace)
+	case "repair":
+		capabilities = withCapabilities(capabilities, CapabilityWorkspace, CapabilityGit, CapabilityShell)
+	case "refactor":
+		capabilities = withCapabilities(capabilities, CapabilityWorkspace, CapabilityEdit, CapabilityGit, CapabilityPlan)
+	case "edit":
 		names["create_file"] = true
 	}
-	skillCreateIntent := mentionsSkill(task) && writeIntent
-	focusedSkillCreation := skillCreateIntent && mode == "edit" && len(contextFiles) == 0
-	if focusedSkillCreation {
-		names = map[string]bool{
-			"guide":       true,
-			"create_file": true,
-		}
-	}
-	if writeIntent && !focusedSkillCreation {
-		names["create_file"] = true
-		if len(contextFiles) > 0 || explicitPathIntent || mentionsNewFile(task) {
-			names["insert_lines"] = true
-			names["replace_lines"] = true
-			names["replace_symbol"] = true
-			names["create_file"] = true
-			names["read_file"] = true
-			names["read_go_symbol"] = true
-		}
-		if len(contextFiles) > 0 {
-			names["diff_patch"] = true
-			names["diff_preview"] = true
-			names["git_diff"] = true
-			names["workspace_checkpoint"] = true
-		}
-	}
+	addCapabilitySpecs(names, capabilities, len(contextFiles) > 0)
+
 	switch mode {
 	case "inspect", "plan":
 		delete(names, "bash")
@@ -201,41 +164,20 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 		delete(names, "workspace_checkpoint")
 		delete(names, "workspace_restore")
 	case "repair":
-		names["git_diff"] = true
-		names["bash"] = true
 		delete(names, "workspace_restore")
 	case "refactor":
-		names["search"] = true
-		names["git_diff"] = true
-		names["diff_preview"] = true
-		names["bash"] = true
-		if len(contextFiles) > 0 {
-			names["diff_patch"] = true
-			names["insert_lines"] = true
-			names["replace_lines"] = true
-			names["replace_symbol"] = true
-			names["create_file"] = true
-			names["workspace_checkpoint"] = true
-		}
+		delete(names, "workspace_restore")
 	case "edit":
 		if len(contextFiles) == 0 {
-			if !skillCreateIntent && !mentionsNewFile(task) && !explicitPathIntent {
-				delete(names, "insert_lines")
-				delete(names, "replace_lines")
-				delete(names, "replace_symbol")
-			}
 			delete(names, "diff_patch")
 			delete(names, "write_file")
 		}
-	}
-	if codeIntent && len(task) < 80 && !writeIntent && !shellIntent && mentionsFileListing(task) {
-		names["list_files"] = true
 	}
 
 	specs := make([]llm.ToolSpec, 0, len(names))
 	for name := range r.tools {
 		if isMCPTool(name) {
-			if mode == "plan" {
+			if mode == "plan" || !capabilities[CapabilityExternal] {
 				continue
 			}
 			names[name] = true
@@ -254,6 +196,59 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 	}
 	sortSpecs(specs)
 	return specs
+}
+
+func addCapabilitySpecs(names map[string]bool, capabilities map[string]bool, hasContextCart bool) {
+	if capabilities[CapabilityEdit] {
+		capabilities = withCapability(capabilities, CapabilityWorkspace)
+	}
+	if capabilities[CapabilityWorkspace] {
+		for _, name := range []string{"guide", "project_map", "search", "list_files", "file_outline", "read_symbol", "read_go_symbol", "read_file"} {
+			names[name] = true
+		}
+	}
+	if capabilities[CapabilityEdit] {
+		for _, name := range []string{"create_file", "insert_lines", "replace_lines", "replace_symbol"} {
+			names[name] = true
+		}
+		if hasContextCart {
+			names["diff_patch"] = true
+			names["diff_preview"] = true
+			names["workspace_checkpoint"] = true
+		}
+	}
+	if capabilities[CapabilityGit] {
+		for _, name := range []string{"git_status", "git_diff", "workspace_checkpoint_list"} {
+			names[name] = true
+		}
+	}
+	if capabilities[CapabilityShell] {
+		names["policy_check"] = true
+		names["bash"] = true
+	}
+	if capabilities[CapabilityWeb] {
+		names["guide"] = true
+		names["web_search"] = true
+		names["fetch_url"] = true
+	}
+	if capabilities[CapabilityPlan] {
+		names["update_plan"] = true
+	}
+}
+
+func withCapability(capabilities map[string]bool, capability string) map[string]bool {
+	return withCapabilities(capabilities, capability)
+}
+
+func withCapabilities(capabilities map[string]bool, values ...string) map[string]bool {
+	out := make(map[string]bool, len(capabilities)+len(values))
+	for capability, enabled := range capabilities {
+		out[capability] = enabled
+	}
+	for _, capability := range values {
+		out[capability] = true
+	}
+	return out
 }
 
 func isHiddenToolSpec(name string) bool {
@@ -429,94 +424,38 @@ func sortSpecs(specs []llm.ToolSpec) {
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
 }
 
-func mentionsGo(task string) bool {
-	return strings.Contains(task, ".go") || strings.Contains(task, " go ") || strings.Contains(task, "golang")
-}
-
-func mentionsCodeWorkspace(task string) bool {
-	return containsAny(task, []string{
-		"repo", "repository", "project", "workspace", "codebase", "file", "directory", "folder",
-		"function", "class", "method", "module", "package", "bug", "error", "stack trace",
-		"репо", "репозитор", "проект", "воркспейс", "код", "кодовая база", "файл", "папк",
-		"директор", "функц", "класс", "метод", "модул", "пакет", "баг", "ошибк", "трейс",
-		".go", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".java", ".md", ".json", ".yaml", ".yml",
-	})
-}
-
 func mentionsSpecificPath(task string) bool {
 	for _, field := range strings.Fields(task) {
 		field = strings.Trim(field, ".,:;!?()[]{}\"'`")
 		lower := strings.ToLower(strings.ReplaceAll(field, "\\", "/"))
-		if strings.Contains(lower, "/") && filepathExtLooksUseful(lower) {
+		if strings.Contains(lower, "/") && looksLikeFilePath(lower) {
 			return true
 		}
-		if filepathExtLooksUseful(lower) {
-			return true
-		}
-	}
-	return false
-}
-
-func filepathExtLooksUseful(path string) bool {
-	for _, ext := range []string{".go", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".java", ".md", ".json", ".yaml", ".yml", ".css", ".html", ".sh", ".toml"} {
-		if strings.HasSuffix(path, ext) {
+		if looksLikeFilePath(lower) {
 			return true
 		}
 	}
 	return false
 }
 
-func mentionsFileListing(task string) bool {
-	return containsAny(task, []string{"list files", "show files", "tree", "ls ", "файлы", "список файлов", "структур"})
+func looksLikeFilePath(path string) bool {
+	ext := strings.TrimPrefix(filepath.Ext(path), ".")
+	if ext == "" || len(ext) > 12 {
+		return false
+	}
+	for _, char := range ext {
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) {
+			return false
+		}
+	}
+	return true
 }
 
-func mentionsGit(task string) bool {
-	return containsAny(task, []string{"git", "diff", "status", "commit", "branch", "статус", "дифф", "коммит", "ветк"})
-}
-
-func mentionsPlanning(task string) bool {
-	return containsAny(task, []string{"plan", "roadmap", "architecture", "design ", "milestone", "план", "роадмап", "архитект", "спроект", "этап"})
-}
-
-func mentionsNewFile(task string) bool {
-	return containsAny(task, []string{"new file", "create file", "add file", "создай файл", "новый файл", "добавь файл"})
-}
-
-func mentionsShell(task string) bool {
-	return containsAny(task, []string{"run ", "запусти", "команд", "bash", "shell", "terminal", "build", "сбор", "lint", "test", "тест"})
-}
-
-func mentionsTest(task string) bool {
-	return containsAny(task, []string{"test", "тест", "verify", "проверь", "validation", "smoke"})
-}
-
-func mentionsEdit(task string) bool {
-	return containsAny(task, []string{
-		"implement", "add ", "fix", "change", "edit", "write", "refactor", "delete",
-		"реализ", "добав", "исправ", "измени", "поправ", "напиши", "удали", "рефактор",
-	})
-}
-
-func TaskLooksLikeWriteRequest(task string) bool {
-	return mentionsEdit(strings.ToLower(task))
-}
-
-func mentionsSkill(task string) bool {
-	return containsAny(task, []string{"skill", "skills", "скилл", "скил", "навык"})
-}
-
-func mentionsWeb(task string) bool {
-	return containsAny(task, []string{
-		"http://", "https://", "web", "internet", "online", "site", "url", "latest", "current", "today", "news",
-		"twitch", "youtube", "github.com", "reddit", "twitter", "x.com",
-		"интернет", "в интернете", "веб", "сайт", "ссылк", "url", "актуаль", "последн", "новост", "сегодня", "найди в сети",
-		"твитч", "ютуб", "канал", "страниц",
-	})
-}
-
-func containsAny(text string, needles []string) bool {
-	for _, needle := range needles {
-		if strings.Contains(text, needle) {
+func hasURL(task string) bool {
+	for _, field := range strings.Fields(task) {
+		field = strings.Trim(field, ".,:;!?()[]{}\"'`")
+		parsed, err := url.ParseRequestURI(field)
+		if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" {
 			return true
 		}
 	}
@@ -541,7 +480,7 @@ func isMCPTool(name string) bool {
 
 func SuppressRepeatedSuccessfulCall(name string) bool {
 	switch name {
-	case "project_map", "git_status", "git_diff", "workspace_checkpoint_list", "policy_check",
+	case "discover_tools", "project_map", "git_status", "git_diff", "workspace_checkpoint_list", "policy_check",
 		"list_files", "read_file", "file_outline", "read_symbol", "read_go_symbol", "search":
 		return true
 	default:

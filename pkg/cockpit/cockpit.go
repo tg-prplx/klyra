@@ -386,20 +386,5 @@ func denyFileReason(path string, entry os.DirEntry) string {
 	if info, err := entry.Info(); err == nil && info.Size() > 256*1024 {
 		return "large file"
 	}
-	if strings.Contains(lower, "/migrations/") && oldMigrationName(name) {
-		return "old migration"
-	}
 	return ""
-}
-
-func oldMigrationName(name string) bool {
-	if len(name) < 8 {
-		return false
-	}
-	for i := 0; i < 8; i++ {
-		if name[i] < '0' || name[i] > '9' {
-			return false
-		}
-	}
-	return true
 }

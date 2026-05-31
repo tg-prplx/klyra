@@ -142,6 +142,36 @@ func TestAgentSuppressesRepeatedReadOnlyCallAndAllowsRecovery(t *testing.T) {
 	}
 }
 
+func TestAgentUnlocksCapabilitiesAfterDiscovery(t *testing.T) {
+	provider := &scriptedProvider{responses: []llm.Response{
+		{ToolCalls: []llm.ToolCall{{
+			ID:        "call-1",
+			Name:      "discover_tools",
+			Arguments: map[string]any{"capabilities": []any{"workspace"}},
+		}}},
+		{Content: "done"},
+	}}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewRegistry(tools.DiscoverTools{}, &countingTool{name: "project_map"}),
+		Output:   io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.RunConversation(context.Background(), nil, "arbitrary request"); err != nil {
+		t.Fatal(err)
+	}
+	if hasToolSpecName(provider.requests[0].Tools, "project_map") {
+		t.Fatalf("project_map should stay hidden before discovery: %+v", provider.requests[0].Tools)
+	}
+	if !hasToolSpecName(provider.requests[1].Tools, "project_map") {
+		t.Fatalf("project_map should unlock after discovery: %+v", provider.requests[1].Tools)
+	}
+}
+
 func TestAgentStopsRepeatedReadOnlyLoopEarly(t *testing.T) {
 	call := func(id string) llm.Response {
 		return llm.Response{Content: "inspect", ToolCalls: []llm.ToolCall{{
@@ -568,9 +598,9 @@ func TestAgentInjectsMatchedSkills(t *testing.T) {
 	}
 }
 
-func TestAgentFailsFastForWriteRequestInInspectMode(t *testing.T) {
+func TestAgentInspectModeDoesNotGuessIntentFromTaskText(t *testing.T) {
 	provider := &scriptedProvider{
-		responses: []llm.Response{{Content: "should not be called"}},
+		responses: []llm.Response{{Content: "switch to edit mode to modify files"}},
 	}
 	agent, err := New(Config{
 		CWD:      t.TempDir(),
@@ -581,12 +611,16 @@ func TestAgentFailsFastForWriteRequestInInspectMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = agent.RunConversation(context.Background(), nil, "напиши сам себе скилл")
-	if err == nil || !strings.Contains(err.Error(), "mode inspect blocks write-like requests") {
-		t.Fatalf("expected inspect mode write guard, got %v", err)
+	if _, err = agent.RunConversation(context.Background(), nil, "напиши сам себе скилл"); err != nil {
+		t.Fatal(err)
 	}
-	if len(provider.requests) != 0 {
-		t.Fatalf("provider should not be called for blocked inspect write request: %+v", provider.requests)
+	if len(provider.requests) != 1 {
+		t.Fatalf("expected provider request, got %+v", provider.requests)
+	}
+	for _, name := range []string{"create_file", "replace_lines", "bash"} {
+		if hasToolSpecName(provider.requests[0].Tools, name) {
+			t.Fatalf("inspect mode exposed %s: %+v", name, provider.requests[0].Tools)
+		}
 	}
 }
 
