@@ -3,4 +3,4 @@
 .agentcli/
 /klyra
 .klyra/
-
+.env
