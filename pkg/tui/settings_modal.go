@@ -86,7 +86,7 @@ func NewSettingsModal(
 		// Safety section
 		{Section: secSafety, Name: "approval", DisplayName: "Approval", Value: approval, Choices: []string{"auto", "ask", "always", "never"}},
 		{Section: secSafety, Name: "sandbox", DisplayName: "Sandbox", Value: sandbox, Choices: []string{"read-only", "workspace-write", "danger-full-access"}},
-		{Section: secSafety, Name: "mode", DisplayName: "Mode", Value: mode, Choices: []string{"inspect", "edit", "repair", "refactor"}},
+		{Section: secSafety, Name: "mode", DisplayName: "Mode", Value: mode, Choices: []string{"plan", "inspect", "edit", "repair", "refactor"}},
 		{Section: secSafety, Name: "store", DisplayName: "Provider Store", Value: onOff(storeResponses), Choices: []string{"on", "off"}},
 
 		// Limits section

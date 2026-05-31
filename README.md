@@ -138,6 +138,7 @@ Image attachments are sent only with the next model request and are not stored a
 
 Klyra has real mode constraints, not just labels:
 
+- `plan`: read-only exploration and web retrieval with an optional structured `update_plan`; shell, writes, patches, and external MCP tools are hidden/blocked.
 - `inspect`: retrieval only; write tools and shell are hidden/blocked.
 - `edit`: write tools require files in the context cart.
 - `repair`: keeps the agent focused on failing output, relevant code, and current diff.
@@ -146,6 +147,7 @@ Klyra has real mode constraints, not just labels:
 Use CLI flags or TUI commands:
 
 ```sh
+go run . --mode plan run "plan the auth refactor"
 go run . --mode inspect run "map the auth flow"
 go run . --mode edit --context-file pkg/auth/middleware.go run "fix the auth bug"
 ```
@@ -284,6 +286,7 @@ The context cockpit also builds a small retrieval cart before each task. It rank
 - `write_file`: legacy full-file writer; hidden from normal edit prompts and blocked from overwriting existing files in edit/refactor/repair mode.
 - `search`: searches with `rg`.
 - `web_search`, `fetch_url`: searches public web and fetches pages; `fetch_url` can use a focus query to return only relevant page chunks via local retrieval.
+- `update_plan`: records a short structured plan for plan mode or explicitly multi-step work.
 - `bash`: runs shell commands with timeout and output compression.
 - `diff_patch`: applies unified diffs via `git apply`.
 

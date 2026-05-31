@@ -308,6 +308,7 @@ func SandboxPicker(current string) PickerModal {
 
 func ModePicker(current string) PickerModal {
 	return NewPicker("Agent Mode", "mode", current, []PickerOption{
+		{Value: "plan", Label: "Plan", Description: "read-only exploration and planning"},
 		{Value: "inspect", Label: "Inspect", Description: "read-only exploration"},
 		{Value: "edit", Label: "Edit", Description: "modify files in cart"},
 		{Value: "repair", Label: "Repair", Description: "fix failing output"},

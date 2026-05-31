@@ -120,7 +120,7 @@ func newRootCommand() *cobra.Command {
 	root.PersistentFlags().BoolVar(&opts.noStream, "no-stream", false, "disable model output streaming")
 	root.PersistentFlags().StringVar(&opts.approval, "approval", "", "tool approval mode: auto, ask, always, never")
 	root.PersistentFlags().StringVar(&opts.sandbox, "sandbox", "", "sandbox profile: read-only, workspace-write, danger-full-access")
-	root.PersistentFlags().StringVar(&opts.mode, "mode", "", "agent mode: inspect, edit, repair, refactor")
+	root.PersistentFlags().StringVar(&opts.mode, "mode", "", "agent mode: plan, inspect, edit, repair, refactor")
 	root.PersistentFlags().StringSliceVar(&opts.contextFiles, "context-file", nil, "file allowed in edit/refactor context cart; repeatable")
 	root.PersistentFlags().StringVar(&opts.sessionID, "session", "", "session id for persistent conversations")
 	root.PersistentFlags().BoolVar(&opts.contextCockpit, "context-cockpit", false, "enable context cockpit fact cards")
@@ -404,7 +404,7 @@ func newTUICommand(opts *options) *cobra.Command {
 				{Name: "/limits", Description: "Set token/step budgets"},
 				{Name: "/approval", Description: "Set approval mode: auto/ask/always/never"},
 				{Name: "/sandbox", Description: "Set sandbox: read-only/workspace-write/danger-full-access"},
-				{Name: "/mode", Description: "Set mode: inspect/edit/repair/refactor"},
+				{Name: "/mode", Description: "Set mode: plan/inspect/edit/repair/refactor"},
 				{Name: "/cart", Description: "Show or add context cart files"},
 				{Name: "/context", Description: "Show context cockpit fact cards"},
 				{Name: "/attach", Description: "Attach an image to the next model request"},
@@ -552,7 +552,7 @@ func newTUICommand(opts *options) *cobra.Command {
 						return formatSettingSaved("sandbox", runtimeCfg.Sandbox), nil
 					case "/mode":
 						if len(args) < 2 {
-							return "usage: /mode inspect|edit|repair|refactor", nil
+							return "usage: /mode plan|inspect|edit|repair|refactor", nil
 						}
 						runtimeCfg.Mode = args[1]
 						_ = runtimeCfg.Save(opts.configPath)

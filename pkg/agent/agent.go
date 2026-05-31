@@ -208,6 +208,7 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 		systemMessage = strings.TrimSpace(systemMessage) + "\n\nContext cockpit fact cards. Use these as a compact starting slice, then verify with tools:\n" + cockpitSnapshot.PromptText()
 	}
 	systemMessage = withCurrentTime(systemMessage, time.Now())
+	systemMessage = withModeInstructions(systemMessage, a.cfg.Mode)
 
 	window := contextmgr.NewBudgetedWindow(a.cfg.MaxMessages, a.cfg.MaxContext)
 	window.Add(llm.Message{Role: llm.RoleSystem, Content: systemMessage})
@@ -227,8 +228,10 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	var lastUsage llm.Usage
 	var lastDebug ContextDebug
 	failedToolCalls := map[string]tools.Result{}
+	successfulPlanCalls := map[string]tools.Result{}
 	guideCompleted := false
 	repeatedGuideCalls := 0
+	repeatedPlanCalls := 0
 	for step := 1; step <= a.cfg.MaxSteps; step++ {
 		specs := a.cfg.Tools.SpecsForTaskMode(task, a.cfg.Mode, a.cfg.ContextFiles)
 		lastDebug = a.contextDebug(specs)
@@ -278,6 +281,21 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 				return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, err
 			}
 			signature := toolCallSignature(call)
+			if previous, repeated := successfulPlanCalls[signature]; call.Name == "update_plan" && repeated {
+				repeatedPlanCalls++
+				err := fmt.Errorf("repeated update_plan call suppressed; this exact plan is already current; make progress, update changed statuses, or answer the user")
+				observation := toolObservation(call, tools.Result{Output: previous.Output}, err)
+				window.Add(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: observation})
+				fmt.Fprintf(a.cfg.Output, "tool error: %v\n", err)
+				if progressErr := a.emitToolProgress(ToolProgressEvent{Phase: "error", Tool: call.Name, ID: call.ID, Args: call.Arguments, Output: previous.Output, Error: err.Error()}); progressErr != nil {
+					return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, progressErr
+				}
+				if repeatedPlanCalls >= 2 {
+					a.printUsage(lastUsage)
+					return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, fmt.Errorf("agent stopped after repeated update_plan loop")
+				}
+				continue
+			}
 			if call.Name == "guide" && guideCompleted {
 				repeatedGuideCalls++
 				err := fmt.Errorf("repeated guide call suppressed; guidance was already provided for this run; use a task tool or answer the user")
@@ -320,6 +338,9 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			window.Add(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: observation})
 			if call.Name == "guide" && err == nil {
 				guideCompleted = true
+			}
+			if call.Name == "update_plan" && err == nil {
+				successfulPlanCalls[signature] = result
 			}
 			if err != nil {
 				failedToolCalls[signature] = result
@@ -582,6 +603,7 @@ General principles:
 - Use web_search/fetch_url for current or external internet facts, and cite URLs in the answer.
 - Treat mcp_* tools as external capabilities: use them only when their name/description fits the task.
 - Call guide at most once per user request. After it returns, follow the workflow with a task tool or answer the user.
+- Use update_plan for non-trivial multi-step work only. Keep it short and update it only when status or scope changes.
 - After any tool failure, read the observation, change strategy once, and do not repeat the same failed call with the same arguments.
 - Answer clearly, concisely, and with actionable detail.
 
@@ -594,6 +616,18 @@ When working with code and files:
 - New files: use create_file and include a short description explaining why the file exists.
 - Verify focused changes with the cheapest relevant check, then answer with what changed, what was checked, and remaining risk.
 - Never edit outside the workspace.`)
+}
+
+func withModeInstructions(base, mode string) string {
+	if !strings.EqualFold(strings.TrimSpace(mode), "plan") {
+		return base
+	}
+	return strings.TrimSpace(base) + `
+
+Plan mode is active:
+- Explore with read-only tools and web retrieval only. Do not modify files, execute shell commands, or call external MCP tools.
+- Use update_plan to record a short actionable plan when the task has multiple steps.
+- Return a concise implementation plan with relevant files, checks, and unresolved decisions.`
 }
 
 func toolErrorGuidance(call llm.ToolCall, result tools.Result, runErr error) string {
@@ -615,6 +649,8 @@ func toolErrorGuidance(call llm.ToolCall, result tools.Result, runErr error) str
 		}
 	case "bash":
 		return "Use the command output to choose a narrower fix or a cheaper diagnostic command."
+	case "update_plan":
+		return "Do not repeat the same plan. Continue the work, change step statuses when progress changes, or answer the user."
 	}
 	if strings.Contains(text, "repeated failed tool call suppressed") {
 		return "Choose a different tool or change the arguments before continuing."

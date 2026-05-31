@@ -61,6 +61,53 @@ func TestSpecsForSimpleChatHidesWorkspaceTools(t *testing.T) {
 	}
 }
 
+func TestPlanModeExposesPlanningAndReadOnlyTools(t *testing.T) {
+	specs := NewDefaultRegistry().SpecsForTaskMode("спланируй исправление pkg/agent/agent.go", "plan", nil)
+	for _, name := range []string{"update_plan", "project_map", "search", "file_outline", "read_file"} {
+		if !hasSpec(specs, name) {
+			t.Fatalf("plan mode should expose %s: %+v", name, specs)
+		}
+	}
+	for _, name := range []string{"bash", "create_file", "replace_lines", "diff_patch"} {
+		if hasSpec(specs, name) {
+			t.Fatalf("plan mode should hide %s: %+v", name, specs)
+		}
+	}
+}
+
+func TestPlanningIntentExposesUpdatePlanWithoutPollutingSimpleChat(t *testing.T) {
+	if !hasSpec(NewDefaultRegistry().SpecsForTask("составь план рефакторинга проекта"), "update_plan") {
+		t.Fatal("explicit planning intent should expose update_plan")
+	}
+	if hasSpec(NewDefaultRegistry().SpecsForTask("привет"), "update_plan") {
+		t.Fatal("simple chat should not expose update_plan")
+	}
+}
+
+func TestPlanModeBlocksDirectWritesAndExternalMCP(t *testing.T) {
+	registry := NewDefaultRegistry()
+	_, err := registry.RunWithPolicy(context.Background(), t.TempDir(), "workspace-write", "plan", nil, llm.ToolCall{
+		Name:      "create_file",
+		Arguments: map[string]any{"path": "blocked.txt", "content": "no"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "mode plan blocks create_file") {
+		t.Fatalf("expected plan mode write block, got %v", err)
+	}
+
+	registry.Register(MCPTool{
+		server:   MCPServerConfig{Name: "demo"},
+		toolName: "echo",
+		spec:     llm.ToolSpec{Name: "mcp_demo_echo", Parameters: objectSchema(map[string]any{})},
+	})
+	if hasSpec(registry.SpecsForTaskMode("plan project changes", "plan", nil), "mcp_demo_echo") {
+		t.Fatal("plan mode should hide external MCP tool schemas")
+	}
+	_, err = registry.RunWithPolicy(context.Background(), t.TempDir(), "workspace-write", "plan", nil, llm.ToolCall{Name: "mcp_demo_echo"})
+	if err == nil || !strings.Contains(err.Error(), "mode plan blocks external MCP tool") {
+		t.Fatalf("expected plan mode MCP block, got %v", err)
+	}
+}
+
 func TestSpecsHideLegacyWriteFile(t *testing.T) {
 	specs := NewDefaultRegistry().Specs()
 	if hasSpec(specs, "write_file") {

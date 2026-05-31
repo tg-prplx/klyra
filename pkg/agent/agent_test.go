@@ -180,6 +180,82 @@ func TestAgentStopsRepeatedGuideLoopEarly(t *testing.T) {
 	}
 }
 
+func TestAgentSuppressesRepeatedPlanUpdateAndAllowsRecovery(t *testing.T) {
+	planCall := func(id string) llm.Response {
+		return llm.Response{Content: "planning", ToolCalls: []llm.ToolCall{{
+			ID:   id,
+			Name: "update_plan",
+			Arguments: map[string]any{"steps": []any{
+				map[string]any{"step": "Inspect parser", "status": "in_progress"},
+				map[string]any{"step": "Patch parser", "status": "pending"},
+			}},
+		}}}
+	}
+	provider := &scriptedProvider{
+		responses: []llm.Response{
+			planCall("call-1"),
+			planCall("call-2"),
+			{Content: "done"},
+		},
+	}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewDefaultRegistry(),
+		Output:   io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := agent.RunConversation(context.Background(), nil, "plan parser refactor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Final != "done" {
+		t.Fatalf("unexpected final response: %q", result.Final)
+	}
+	var suppressed bool
+	for _, msg := range result.Messages {
+		if msg.Role == llm.RoleTool && strings.Contains(msg.Content, "repeated update_plan call suppressed") {
+			suppressed = true
+		}
+	}
+	if !suppressed {
+		t.Fatalf("expected repeated update_plan suppression observation: %+v", result.Messages)
+	}
+}
+
+func TestAgentPlanModeAddsInstructionsAndReadOnlyTools(t *testing.T) {
+	provider := &scriptedProvider{responses: []llm.Response{{Content: "done"}}}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewDefaultRegistry(),
+		Output:   io.Discard,
+		Mode:     "plan",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := agent.RunConversation(context.Background(), nil, "plan a parser fix"); err != nil {
+		t.Fatal(err)
+	}
+	req := provider.requests[0]
+	if !strings.Contains(req.Messages[0].Content, "Plan mode is active") {
+		t.Fatalf("expected plan mode system instructions: %s", req.Messages[0].Content)
+	}
+	if !hasToolSpecName(req.Tools, "update_plan") {
+		t.Fatalf("expected update_plan in plan mode: %+v", req.Tools)
+	}
+	for _, name := range []string{"bash", "create_file", "diff_patch", "replace_lines"} {
+		if hasToolSpecName(req.Tools, name) {
+			t.Fatalf("plan mode exposed %s: %+v", name, req.Tools)
+		}
+	}
+}
+
 func TestAgentAssignsMissingToolCallID(t *testing.T) {
 	provider := &scriptedProvider{
 		responses: []llm.Response{

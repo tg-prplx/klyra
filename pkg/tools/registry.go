@@ -67,6 +67,7 @@ func (r *Registry) IsDisabled(name string) bool {
 func NewDefaultRegistry() *Registry {
 	return NewRegistry(
 		Guide{},
+		UpdatePlan{},
 		ProjectMap{},
 		GitStatus{},
 		GitDiff{},
@@ -120,6 +121,7 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 	shellIntent := mentionsShell(task)
 	testIntent := mentionsTest(task)
 	webIntent := mentionsWeb(task)
+	planningIntent := mentionsPlanning(task)
 	explicitPathIntent := mentionsSpecificPath(task)
 	codeIntent := len(contextFiles) > 0 || writeIntent || shellIntent || testIntent || mentionsCodeWorkspace(task)
 	names := map[string]bool{}
@@ -142,6 +144,9 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 		if shellIntent {
 			names["policy_check"] = true
 		}
+	}
+	if mode == "plan" || planningIntent || mode == "refactor" {
+		names["update_plan"] = true
 	}
 	if webIntent {
 		names["guide"] = true
@@ -179,7 +184,7 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 		}
 	}
 	switch mode {
-	case "inspect":
+	case "inspect", "plan":
 		delete(names, "bash")
 		delete(names, "diff_patch")
 		delete(names, "diff_preview")
@@ -227,6 +232,9 @@ func (r *Registry) SpecsForTaskMode(task, mode string, contextFiles []string) []
 	specs := make([]llm.ToolSpec, 0, len(names))
 	for name := range r.tools {
 		if isMCPTool(name) {
+			if mode == "plan" {
+				continue
+			}
 			names[name] = true
 		}
 	}
@@ -280,9 +288,12 @@ func (r *Registry) RunWithPolicy(ctx context.Context, cwd string, sandbox string
 func enforceMode(mode string, contextFiles []string, call llm.ToolCall) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
 	switch mode {
-	case "inspect":
+	case "inspect", "plan":
 		if isWriteTool(call.Name) {
-			return fmt.Errorf("mode inspect blocks %s", call.Name)
+			return fmt.Errorf("mode %s blocks %s", mode, call.Name)
+		}
+		if mode == "plan" && isMCPTool(call.Name) {
+			return fmt.Errorf("mode plan blocks external MCP tool %s", call.Name)
 		}
 	case "edit":
 		if isFileWriteTool(call.Name) {
@@ -458,6 +469,10 @@ func mentionsFileListing(task string) bool {
 
 func mentionsGit(task string) bool {
 	return containsAny(task, []string{"git", "diff", "status", "commit", "branch", "статус", "дифф", "коммит", "ветк"})
+}
+
+func mentionsPlanning(task string) bool {
+	return containsAny(task, []string{"plan", "roadmap", "architecture", "design ", "milestone", "план", "роадмап", "архитект", "спроект", "этап"})
 }
 
 func mentionsNewFile(task string) bool {
