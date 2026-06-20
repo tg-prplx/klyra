@@ -220,7 +220,7 @@ func TestToolOutputCollapsedByDefaultAndExpands(t *testing.T) {
 		InitialLines: []string{`tool: {"tool":"read_file","output":"line one\nline two\nline three"}`},
 	})
 	view := stripANSI(model.View())
-	if !strings.Contains(view, "read_file") || !strings.Contains(view, "finished") {
+	if !strings.Contains(view, "read_file") || !strings.Contains(view, "done") {
 		t.Fatalf("collapsed tool summary missing:\n%s", view)
 	}
 	if strings.Contains(view, "│ line one") || strings.Contains(view, "│ line two") {
@@ -855,8 +855,11 @@ func TestToolProgressRendersLive(t *testing.T) {
 	})
 	m := updated.(Model)
 	view := stripANSI(m.View())
-	if !strings.Contains(view, "read_file") || !strings.Contains(view, "running") || !strings.Contains(view, "details collapsed") {
+	if !strings.Contains(view, "read_file") || !strings.Contains(view, "running") {
 		t.Fatalf("tool progress missing from view:\n%s", view)
+	}
+	if strings.Contains(view, "details collapsed") || strings.Contains(view, "running tool") {
+		t.Fatalf("tool progress should be minimal:\n%s", view)
 	}
 }
 
@@ -877,8 +880,11 @@ func TestToolStreamDeltasAggregateIntoOneCollapsedLine(t *testing.T) {
 		t.Fatalf("expected one aggregated toolstream line, got %d: %#v", count, m.lines)
 	}
 	view := stripANSI(m.View())
-	if strings.Count(view, "model is preparing tool call") != 1 {
+	if strings.Count(view, "planned") != 1 {
 		t.Fatalf("tool stream should render as one collapsed block:\n%s", view)
+	}
+	if strings.Contains(view, "model is preparing tool call") || strings.Contains(view, "details collapsed") {
+		t.Fatalf("tool stream should be minimal:\n%s", view)
 	}
 	if strings.Contains(view, "│") {
 		t.Fatalf("tool stream details should be collapsed by default:\n%s", view)

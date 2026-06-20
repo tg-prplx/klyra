@@ -17,6 +17,21 @@ func TestTaskTextDoesNotGuessCapabilities(t *testing.T) {
 	}
 }
 
+func TestToolSpecsAreMinimal(t *testing.T) {
+	specs := NewDefaultRegistry().SpecsForCapabilities("anything", "", nil, map[string]bool{CapabilityWorkspace: true, CapabilityEdit: true, CapabilityShell: true, CapabilityWeb: true})
+	if len(specs) == 0 {
+		t.Fatal("expected tool specs")
+	}
+	for _, spec := range specs {
+		if strings.Contains(spec.Description, "Use this") || strings.Contains(spec.Description, "Prefer") || strings.Contains(spec.Description, "current task") {
+			t.Fatalf("tool description should stay compact for %s: %q", spec.Name, spec.Description)
+		}
+		if schemaHasKey(spec.Parameters, "description") || schemaHasKey(spec.Parameters, "title") {
+			t.Fatalf("tool schema should not include verbose metadata for %s: %+v", spec.Name, spec.Parameters)
+		}
+	}
+}
+
 func TestSpecsForExplicitFileEditExposeFocusedTools(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForTaskMode("исправь pkg/agent/agent.go", "edit", nil)
 	if !hasSpec(specs, "read_file") || !hasSpec(specs, "replace_lines") || !hasSpec(specs, "replace_symbol") || !hasSpec(specs, "insert_lines") {
@@ -311,6 +326,27 @@ func hasSpec(specs []llm.ToolSpec, name string) bool {
 	for _, spec := range specs {
 		if spec.Name == name {
 			return true
+		}
+	}
+	return false
+}
+
+func schemaHasKey(value any, key string) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if _, ok := typed[key]; ok {
+			return true
+		}
+		for _, nested := range typed {
+			if schemaHasKey(nested, key) {
+				return true
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			if schemaHasKey(nested, key) {
+				return true
+			}
 		}
 	}
 	return false

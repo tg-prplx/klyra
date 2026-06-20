@@ -108,7 +108,7 @@ func (r *Registry) Specs() []llm.ToolSpec {
 		if isHiddenToolSpec(name) {
 			continue
 		}
-		specs = append(specs, tool.Spec())
+		specs = append(specs, compactToolSpec(tool.Spec()))
 	}
 	sortSpecs(specs)
 	return specs
@@ -191,11 +191,71 @@ func (r *Registry) SpecsForCapabilities(task, mode string, contextFiles []string
 			continue
 		}
 		if tool, ok := r.tools[name]; ok {
-			specs = append(specs, tool.Spec())
+			specs = append(specs, compactToolSpec(tool.Spec()))
 		}
 	}
 	sortSpecs(specs)
 	return specs
+}
+
+var compactToolDescriptions = map[string]string{
+	"discover_tools":        "Unlock tool groups for this run.",
+	"guide":                 "Get brief workflow guidance.",
+	"update_plan":           "Update a short task plan.",
+	"project_map":           "Show a compact workspace map.",
+	"list_files":            "List workspace files.",
+	"search":                "Search workspace text.",
+	"file_outline":          "Show file symbols.",
+	"read_symbol":           "Read one symbol.",
+	"read_go_symbol":        "Read one Go symbol.",
+	"read_file":             "Read file lines.",
+	"create_file":           "Create a new file.",
+	"insert_lines":          "Insert file lines.",
+	"replace_lines":         "Replace file lines.",
+	"replace_symbol":        "Replace one symbol.",
+	"diff_preview":          "Validate a patch.",
+	"diff_patch":            "Apply a patch.",
+	"git_status":            "Show git status.",
+	"git_diff":              "Show git diff.",
+	"workspace_checkpoint":  "Create a checkpoint.",
+	"workspace_checkpoints": "List checkpoints.",
+	"workspace_restore":     "Restore a checkpoint.",
+	"policy_check":          "Classify a shell command.",
+	"bash":                  "Run a shell command.",
+	"web_search":            "Search the web.",
+	"fetch_url":             "Fetch a URL.",
+}
+
+func compactToolSpec(spec llm.ToolSpec) llm.ToolSpec {
+	if description := compactToolDescriptions[spec.Name]; description != "" {
+		spec.Description = description
+	}
+	if parameters, ok := compactSchema(spec.Parameters).(map[string]any); ok {
+		spec.Parameters = parameters
+	}
+	return spec
+}
+
+func compactSchema(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			if key == "description" || key == "title" {
+				continue
+			}
+			out[key] = compactSchema(nested)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, nested := range typed {
+			out[i] = compactSchema(nested)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func addCapabilitySpecs(names map[string]bool, capabilities map[string]bool, hasContextCart bool) {

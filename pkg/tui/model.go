@@ -255,12 +255,12 @@ type Model struct {
 	requestStartTime       time.Time
 
 	// Modal state
-	activeModal    modalKind
-	pickerModal    *PickerModal
-	helpModal      *HelpModal
-	settingsModal  *SettingsModal
-	featuresModal  *FeaturesModal
-	toolsModal     *ToolsModal
+	activeModal   modalKind
+	pickerModal   *PickerModal
+	helpModal     *HelpModal
+	settingsModal *SettingsModal
+	featuresModal *FeaturesModal
+	toolsModal    *ToolsModal
 }
 
 type responseMsg struct {
@@ -3254,9 +3254,9 @@ func (m Model) renderToolStreamLine(raw string) []string {
 	if expanded {
 		icon = "▾"
 	}
-	summary := "model is preparing tool call"
+	summary := "planned"
 	if args != "" {
-		summary += ", " + outputSummary(args, 64)
+		summary += " " + outputSummary(args, 64)
 	}
 	lines := []string{"  " + headerStyle.Render(icon+" "+name) + " " + labelStyle.Render(summary)}
 	if !expanded {
@@ -3330,20 +3330,20 @@ func toolProgressSummary(msg ToolProgressMsg) string {
 	}
 	switch phase {
 	case "queued":
-		return "planned tool call, details collapsed"
+		return "planned"
 	case "running":
-		return "running tool, details collapsed"
+		return "running"
 	case "done":
 		if strings.TrimSpace(msg.Output) == "" {
-			return "finished with empty result"
+			return "done"
 		}
-		return fmt.Sprintf("finished, %s", outputSummary(msg.Output, 70))
+		return fmt.Sprintf("done %s", outputSummary(msg.Output, 70))
 	case "error":
-		return fmt.Sprintf("failed, %s", outputSummary(msg.Error, 70))
+		return fmt.Sprintf("failed %s", outputSummary(msg.Error, 70))
 	case "rejected":
-		return fmt.Sprintf("rejected, %s", outputSummary(msg.Error, 70))
+		return fmt.Sprintf("rejected %s", outputSummary(msg.Error, 70))
 	default:
-		return phase + ", details collapsed"
+		return phase
 	}
 }
 
@@ -3430,12 +3430,12 @@ func parseCollapsiblePayload(raw, prefix string) (bool, string) {
 
 func toolDisplaySummary(display toolDisplay) string {
 	if strings.TrimSpace(display.Error) != "" {
-		return "failed, " + outputSummary(display.Error, 70)
+		return "failed " + outputSummary(display.Error, 70)
 	}
 	if strings.TrimSpace(display.Output) == "" {
-		return "finished with empty result"
+		return "done"
 	}
-	return fmt.Sprintf("finished, %s", outputSummary(display.Output, 70))
+	return fmt.Sprintf("done %s", outputSummary(display.Output, 70))
 }
 
 func outputSummary(text string, maxLen int) string {
