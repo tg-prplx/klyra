@@ -51,3 +51,15 @@ func optionalIntArg(args map[string]any, name string, fallback int) (int, error)
 		return 0, fmt.Errorf("argument %q must be an integer", name)
 	}
 }
+
+func optionalBoolArg(args map[string]any, name string, fallback bool) (bool, error) {
+	value, ok := args[name]
+	if !ok || value == nil {
+		return fallback, nil
+	}
+	typed, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("argument %q must be a boolean", name)
+	}
+	return typed, nil
+}

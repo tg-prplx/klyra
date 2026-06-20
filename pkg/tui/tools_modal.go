@@ -87,6 +87,8 @@ func getToolDescription(name string) string {
 		return "Create/write new files (safety-guarded)"
 	case "create_file":
 		return "Create a new file in workspace"
+	case "edit_file":
+		return "Edit an existing file by exact text"
 	case "replace_lines":
 		return "Replace specific lines in file"
 	case "insert_lines":

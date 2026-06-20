@@ -33,6 +33,48 @@ func TestReplaceLinesReplacesSmallRange(t *testing.T) {
 	}
 }
 
+func TestEditFileReplacesExactText(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "main.go", "package main\n\nfunc main() {\n\tprintln(\"old\")\n}\n")
+	result, err := EditFile{}.Run(context.Background(), Invocation{
+		CWD: dir,
+		Args: map[string]any{
+			"path": "main.go",
+			"old":  "println(\"old\")",
+			"new":  "println(\"new\")",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Output, "edited main.go") {
+		t.Fatalf("unexpected output: %s", result.Output)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `println("new")`) {
+		t.Fatalf("file not edited:\n%s", data)
+	}
+}
+
+func TestEditFileRequiresSpecificOldText(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "main.go", "same\nsame\n")
+	_, err := EditFile{}.Run(context.Background(), Invocation{
+		CWD: dir,
+		Args: map[string]any{
+			"path": "main.go",
+			"old":  "same",
+			"new":  "next",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "matches 2 times") {
+		t.Fatalf("expected ambiguity error, got %v", err)
+	}
+}
+
 func TestInsertLinesInsertsWithoutWholeFileRewritePrompt(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "main.go", "package main\n\nfunc main() {}\n")

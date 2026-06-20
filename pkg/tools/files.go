@@ -147,7 +147,7 @@ type FileWriter struct{}
 func (FileWriter) Spec() llm.ToolSpec {
 	return llm.ToolSpec{
 		Name:        "write_file",
-		Description: "Disabled legacy full-file writer. Use create_file for new files and focused edit tools for existing files.",
+		Description: "Disabled legacy full-file writer. Use create_file for new files and edit_file for existing files.",
 		Parameters: objectSchema(map[string]any{
 			"path":    stringProperty("Relative file path."),
 			"content": stringProperty("Complete file content."),
@@ -209,7 +209,7 @@ func (FileCreator) Run(_ context.Context, inv Invocation) (Result, error) {
 		return Result{}, err
 	}
 	if _, err := os.Stat(target); err == nil {
-		return Result{}, fmt.Errorf("create_file refuses to overwrite existing file %s; use replace_symbol, replace_lines, insert_lines, or diff_patch", requestedPath)
+		return Result{}, fmt.Errorf("create_file refuses to overwrite existing file %s; use edit_file", requestedPath)
 	} else if !os.IsNotExist(err) {
 		return Result{}, err
 	}

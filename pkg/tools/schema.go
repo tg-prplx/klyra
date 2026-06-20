@@ -19,3 +19,7 @@ func stringProperty(description string) map[string]any {
 func integerProperty(description string, minimum int) map[string]any {
 	return map[string]any{"type": "integer", "description": description, "minimum": minimum}
 }
+
+func booleanProperty(description string) map[string]any {
+	return map[string]any{"type": "boolean", "description": description}
+}

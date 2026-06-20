@@ -206,7 +206,7 @@ Use `go run . skills --all` to list skills, or `go run . skills --query "migrati
 
 ## Approval policy
 
-Risky tools (`bash`, `write_file`, `diff_patch`, focused write tools, and checkpoint restore) support approval modes:
+Risky tools (`bash`, `write_file`, `edit_file`, `create_file`, patch tools, and checkpoint restore) support approval modes:
 
 ```sh
 go run . --approval ask run "fix the failing tests"
@@ -283,18 +283,16 @@ The context cockpit also builds a small retrieval cart before each task. It rank
 - `read_file`: reads files with line slicing.
 - `file_outline`: returns compact imports/symbols for one file.
 - `read_symbol`: reads one AST symbol instead of a whole file.
-- `read_go_symbol`: reads a Go declaration by symbol name without loading the whole file.
 - `create_file`: creates new files only.
-- `replace_symbol`, `replace_lines`, `insert_lines`: focused write tools for existing files.
+- `edit_file`: edits existing files by exact text replacement.
 - `write_file`: legacy full-file writer; hidden from normal edit prompts and blocked from overwriting existing files in edit/refactor/repair mode.
 - `search`: searches with `rg`.
 - `web_search`, `fetch_url`: searches public web and fetches pages; `fetch_url` can use a focus query to return only relevant page chunks via local retrieval.
 - `update_plan`: records a short structured plan for plan mode or explicitly multi-step work.
 - `bash`: runs shell commands with timeout and output compression.
-- `diff_patch`: applies unified diffs via `git apply`.
 
 The agent discloses tool schemas progressively without guessing task intent from keyword lists. A fresh run starts with compact `discover_tools`; the model requests only the capability groups needed for the task. Concrete paths, URLs, context-cart entries, and explicit agent modes act as structural shortcuts. Heavy patch/checkpoint tools still require a context cart.
-The agent can also call `policy_check` before risky shell commands; destructive shell patterns are blocked in `--approval auto`.
+Destructive shell patterns are blocked in `--approval auto`.
 
 ## Verification
 

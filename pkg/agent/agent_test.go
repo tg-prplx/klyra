@@ -380,7 +380,7 @@ func TestAgentPlanModeAddsInstructionsAndReadOnlyTools(t *testing.T) {
 	if !hasToolSpecName(req.Tools, "update_plan") {
 		t.Fatalf("expected update_plan in plan mode: %+v", req.Tools)
 	}
-	for _, name := range []string{"bash", "create_file", "diff_patch", "replace_lines"} {
+	for _, name := range []string{"bash", "create_file", "edit_file", "diff_patch", "replace_lines"} {
 		if hasToolSpecName(req.Tools, name) {
 			t.Fatalf("plan mode exposed %s: %+v", name, req.Tools)
 		}
@@ -444,7 +444,7 @@ func TestToolObservationAddsRecoveryGuidance(t *testing.T) {
 		tools.Result{Output: "git apply output"},
 		fmt.Errorf("exit status 128"),
 	)
-	if !strings.Contains(observation, "next_action") || !strings.Contains(observation, "replace_lines") {
+	if !strings.Contains(observation, "next_action") || !strings.Contains(observation, "edit_file") {
 		t.Fatalf("expected recovery guidance in observation: %s", observation)
 	}
 }
@@ -617,7 +617,7 @@ func TestAgentInspectModeDoesNotGuessIntentFromTaskText(t *testing.T) {
 	if len(provider.requests) != 1 {
 		t.Fatalf("expected provider request, got %+v", provider.requests)
 	}
-	for _, name := range []string{"create_file", "replace_lines", "bash"} {
+	for _, name := range []string{"create_file", "edit_file", "replace_lines", "bash"} {
 		if hasToolSpecName(provider.requests[0].Tools, name) {
 			t.Fatalf("inspect mode exposed %s: %+v", name, provider.requests[0].Tools)
 		}

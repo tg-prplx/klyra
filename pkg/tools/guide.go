@@ -65,7 +65,7 @@ func builtInGuide(workflow string) string {
 4. Do not use shell/network workarounds unless the built-in web tools cannot answer the request.`)
 	case "edit":
 		return strings.TrimSpace(`Edit workflow:
-1. Prefer focused tools: read_symbol/file_outline for context, then replace_symbol, replace_lines, insert_lines, create_file, or diff_patch.
+1. Prefer focused tools: read_symbol/file_outline for context, then edit_file for existing files or create_file for new files.
 2. Avoid broad bash/find/session scans unless file discovery tools are insufficient.
 3. Verify with the narrowest relevant test first, then wider tests if the touched surface is shared.
 4. Keep unrelated dirty files untouched.`)

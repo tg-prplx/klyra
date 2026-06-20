@@ -634,7 +634,7 @@ Use tools deliberately:
 - If a needed tool is hidden, call discover_tools once with the smallest capability set.
 - Prefer built-in tools over bash; use bash only when no built-in tool fits.
 - Do not inspect broad maps, sessions, logs, .env, or unrelated files without need.
-- Existing files: use focused edits or patches. New files: use create_file. Never overwrite existing files with write_file.
+- Existing files: use edit_file. New files: use create_file. Never overwrite existing files with write_file.
 - For new projects, create the first concrete file directly; do not loop on empty project_map.
 - For existing code, gather the smallest slice: project_map/search -> outline/symbol -> short read_file.
 - After a tool failure or duplicate result, change strategy once; do not repeat the same call.
@@ -658,14 +658,18 @@ func toolErrorGuidance(call llm.ToolCall, result tools.Result, runErr error) str
 	text := strings.ToLower(runErr.Error() + "\n" + result.Output)
 	switch call.Name {
 	case "diff_preview", "diff_patch":
-		return "Do not retry the same patch. Inspect the target lines, then use replace_lines/replace_symbol for small edits or rebuild the patch with exact context."
+		return "Do not retry the same patch. Inspect the target text, then use edit_file or rebuild the patch with exact context."
 	case "write_file":
 		if strings.Contains(text, "overwrite") || strings.Contains(text, "existing file") {
-			return "Use replace_lines, insert_lines, replace_symbol, or diff_patch for existing files."
+			return "Use edit_file for existing files."
 		}
 	case "create_file":
 		if strings.Contains(text, "overwrite") || strings.Contains(text, "exists") {
-			return "The file already exists. Inspect it and edit it with replace_lines/replace_symbol instead of create_file."
+			return "The file already exists. Inspect it and edit it with edit_file instead of create_file."
+		}
+	case "edit_file":
+		if strings.Contains(text, "old text not found") || strings.Contains(text, "matches") {
+			return "Read the smallest relevant slice, then retry once with exact old text."
 		}
 	case "read_file", "read_symbol", "file_outline":
 		if strings.Contains(text, "no such file") || strings.Contains(text, "not found") {

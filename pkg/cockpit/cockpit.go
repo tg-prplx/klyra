@@ -116,7 +116,7 @@ func Build(ctx context.Context, cfg Config, cwd, focus string, contextFiles []st
 	addCard("aci", "Agent Rails", "preferred low-token workflow", strings.Join([]string{
 		"- map/search/outline before reading files",
 		"- read one symbol or about 100 lines",
-		"- edit existing files with replace_symbol/replace_lines/insert_lines/diff_patch",
+		"- edit existing files with edit_file",
 		"- create new files with create_file; never rewrite existing files from scratch",
 		"- check git diff and run focused tests after edits",
 		"- do not open Negative Context unless asked",

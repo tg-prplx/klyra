@@ -34,11 +34,13 @@ func TestToolSpecsAreMinimal(t *testing.T) {
 
 func TestSpecsForExplicitFileEditExposeFocusedTools(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForTaskMode("исправь pkg/agent/agent.go", "edit", nil)
-	if !hasSpec(specs, "read_file") || !hasSpec(specs, "replace_lines") || !hasSpec(specs, "replace_symbol") || !hasSpec(specs, "insert_lines") {
-		t.Fatalf("explicit file edit should expose focused tools: %+v", specs)
+	if !hasSpec(specs, "read_file") || !hasSpec(specs, "edit_file") || !hasSpec(specs, "create_file") {
+		t.Fatalf("explicit file edit should expose minimal edit tools: %+v", specs)
 	}
-	if hasSpec(specs, "diff_patch") || hasSpec(specs, "bash") {
-		t.Fatalf("explicit file edit should not expose patch/bash before needed: %+v", specs)
+	for _, name := range []string{"replace_lines", "replace_symbol", "insert_lines", "diff_patch", "bash"} {
+		if hasSpec(specs, name) {
+			t.Fatalf("explicit file edit should not expose %s: %+v", name, specs)
+		}
 	}
 }
 
@@ -47,7 +49,7 @@ func TestSpecsForWorkspaceEditModeExposeCreateFileWithoutFocusedEditors(t *testi
 	if !hasSpec(specs, "create_file") {
 		t.Fatalf("workspace task in edit mode should expose create_file immediately: %+v", specs)
 	}
-	for _, name := range []string{"replace_lines", "replace_symbol", "insert_lines", "diff_patch", "read_file"} {
+	for _, name := range []string{"edit_file", "replace_lines", "replace_symbol", "insert_lines", "diff_patch", "read_file"} {
 		if hasSpec(specs, name) {
 			t.Fatalf("new project without files should not expose %s: %+v", name, specs)
 		}
@@ -56,12 +58,12 @@ func TestSpecsForWorkspaceEditModeExposeCreateFileWithoutFocusedEditors(t *testi
 
 func TestSpecsWithContextCartExposeFocusedEditTools(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForTaskMode("исправь баг", "edit", []string{"pkg/agent/agent.go"})
-	for _, name := range []string{"read_file", "replace_lines", "replace_symbol", "insert_lines", "create_file"} {
+	for _, name := range []string{"read_file", "edit_file", "create_file"} {
 		if !hasSpec(specs, name) {
 			t.Fatalf("context cart edit should expose focused tool %s: %+v", name, specs)
 		}
 	}
-	for _, name := range []string{"diff_patch", "diff_preview", "workspace_checkpoint", "bash"} {
+	for _, name := range []string{"replace_lines", "replace_symbol", "insert_lines", "diff_patch", "diff_preview", "workspace_checkpoint", "bash"} {
 		if hasSpec(specs, name) {
 			t.Fatalf("context cart edit should not expose heavier tool %s: %+v", name, specs)
 		}
@@ -120,6 +122,9 @@ func TestSpecsHideLegacyAndHeavyTools(t *testing.T) {
 		"guide",
 		"list_files",
 		"read_go_symbol",
+		"insert_lines",
+		"replace_lines",
+		"replace_symbol",
 		"diff_preview",
 		"diff_patch",
 		"workspace_checkpoint",
@@ -155,7 +160,7 @@ func TestEditModeExposesCreateFileForSkillCreationWithoutContextCart(t *testing.
 	if !hasSpec(specs, "create_file") {
 		t.Fatalf("skill creation should expose create_file even without context cart: %+v", specs)
 	}
-	if hasSpec(specs, "guide") || hasSpec(specs, "project_map") || hasSpec(specs, "bash") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "insert_lines") {
+	if hasSpec(specs, "guide") || hasSpec(specs, "project_map") || hasSpec(specs, "bash") || hasSpec(specs, "edit_file") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_lines") || hasSpec(specs, "insert_lines") {
 		t.Fatalf("skill creation without context cart should expose only focused tools: %+v", specs)
 	}
 }
@@ -198,7 +203,7 @@ func TestRunWithSandboxBlocksNetworkInWorkspaceWrite(t *testing.T) {
 
 func TestSpecsForInspectModeBlocksEditTools(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForTaskMode("fix bug", "inspect", nil)
-	if hasSpec(specs, "write_file") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_symbol") || hasSpec(specs, "bash") {
+	if hasSpec(specs, "write_file") || hasSpec(specs, "edit_file") || hasSpec(specs, "diff_patch") || hasSpec(specs, "replace_symbol") || hasSpec(specs, "bash") {
 		t.Fatalf("inspect mode should expose retrieval only: %+v", specs)
 	}
 }
@@ -233,6 +238,18 @@ func TestEditModeBlocksCreateFileOutsideContextCart(t *testing.T) {
 	}
 }
 
+func TestEditModeBlocksEditFileOutsideContextCart(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, dir, "other.go", "old\n")
+	_, err := NewDefaultRegistry().RunWithPolicy(context.Background(), dir, "workspace-write", "edit", []string{"allowed.go"}, llm.ToolCall{
+		Name:      "edit_file",
+		Arguments: map[string]any{"path": "other.go", "old": "old", "new": "new"},
+	})
+	if err == nil {
+		t.Fatal("expected edit mode to block edit_file outside context cart")
+	}
+}
+
 func TestEditModeAllowsCreateFileWithoutContextCart(t *testing.T) {
 	dir := t.TempDir()
 	result, err := NewDefaultRegistry().RunWithPolicy(context.Background(), dir, "workspace-write", "edit", nil, llm.ToolCall{
@@ -251,14 +268,14 @@ func TestEditModeAllowsFocusedEditWithoutContextCart(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "notes.md", "old\n")
 	result, err := NewDefaultRegistry().RunWithPolicy(context.Background(), dir, "workspace-write", "edit", nil, llm.ToolCall{
-		Name:      "replace_lines",
-		Arguments: map[string]any{"path": "notes.md", "start_line": 1, "end_line": 1, "content": "new"},
+		Name:      "edit_file",
+		Arguments: map[string]any{"path": "notes.md", "old": "old", "new": "new"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Output == "" {
-		t.Fatal("expected replace_lines output")
+		t.Fatal("expected edit_file output")
 	}
 }
 

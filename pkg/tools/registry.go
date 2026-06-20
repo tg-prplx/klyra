@@ -89,6 +89,7 @@ func NewDefaultRegistry() *Registry {
 		FetchURL{},
 		FileWriter{},
 		FileCreator{},
+		EditFile{},
 		ReplaceLines{},
 		InsertLines{},
 		ReplaceSymbol{},
@@ -155,6 +156,7 @@ func (r *Registry) SpecsForCapabilities(task, mode string, contextFiles []string
 		delete(names, "bash")
 		delete(names, "diff_patch")
 		delete(names, "diff_preview")
+		delete(names, "edit_file")
 		delete(names, "create_file")
 		delete(names, "git_diff")
 		delete(names, "insert_lines")
@@ -210,6 +212,7 @@ var compactToolDescriptions = map[string]string{
 	"read_go_symbol":        "Read one Go symbol.",
 	"read_file":             "Read file lines.",
 	"create_file":           "Create a new file.",
+	"edit_file":             "Edit an existing file.",
 	"insert_lines":          "Insert file lines.",
 	"replace_lines":         "Replace file lines.",
 	"replace_symbol":        "Replace one symbol.",
@@ -268,7 +271,7 @@ func addCapabilitySpecs(names map[string]bool, capabilities map[string]bool) {
 		}
 	}
 	if capabilities[CapabilityEdit] {
-		for _, name := range []string{"create_file", "insert_lines", "replace_lines", "replace_symbol"} {
+		for _, name := range []string{"create_file", "edit_file"} {
 			names[name] = true
 		}
 	}
@@ -310,6 +313,9 @@ func isHiddenToolSpec(name string) bool {
 		"guide",
 		"list_files",
 		"read_go_symbol",
+		"insert_lines",
+		"replace_lines",
+		"replace_symbol",
 		"diff_preview",
 		"diff_patch",
 		"workspace_checkpoint",
@@ -383,15 +389,15 @@ func enforceMode(mode string, contextFiles []string, call llm.ToolCall) error {
 }
 
 func isWriteTool(name string) bool {
-	return name == "write_file" || name == "create_file" || name == "diff_patch" || name == "replace_lines" || name == "insert_lines" || name == "replace_symbol" || name == "workspace_restore" || name == "bash"
+	return name == "write_file" || name == "create_file" || name == "edit_file" || name == "diff_patch" || name == "replace_lines" || name == "insert_lines" || name == "replace_symbol" || name == "workspace_restore" || name == "bash"
 }
 
 func isFileWriteTool(name string) bool {
-	return name == "write_file" || name == "create_file" || name == "diff_patch" || name == "replace_lines" || name == "insert_lines" || name == "replace_symbol"
+	return name == "write_file" || name == "create_file" || name == "edit_file" || name == "diff_patch" || name == "replace_lines" || name == "insert_lines" || name == "replace_symbol"
 }
 
 func primaryWritePath(call llm.ToolCall) string {
-	if call.Name == "write_file" || call.Name == "create_file" || call.Name == "replace_lines" || call.Name == "insert_lines" || call.Name == "replace_symbol" {
+	if call.Name == "write_file" || call.Name == "create_file" || call.Name == "edit_file" || call.Name == "replace_lines" || call.Name == "insert_lines" || call.Name == "replace_symbol" {
 		path, _ := call.Arguments["path"].(string)
 		return path
 	}
@@ -460,7 +466,7 @@ func enforceWriteToolUsage(cwd, mode string, call llm.ToolCall) error {
 		return err
 	}
 	if _, err := os.Stat(target); err == nil {
-		return fmt.Errorf("write_file refuses to overwrite existing file %s in %s mode; use replace_symbol, replace_lines, insert_lines, or diff_patch", path, mode)
+		return fmt.Errorf("write_file refuses to overwrite existing file %s in %s mode; use edit_file", path, mode)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -473,7 +479,7 @@ func enforceSandbox(sandbox string, call llm.ToolCall) error {
 		return fmt.Errorf("sandbox %s blocks external MCP tool %s", profile, call.Name)
 	}
 	switch call.Name {
-	case "write_file", "create_file", "diff_patch", "replace_lines", "insert_lines", "replace_symbol", "workspace_restore":
+	case "write_file", "create_file", "edit_file", "diff_patch", "replace_lines", "insert_lines", "replace_symbol", "workspace_restore":
 		if profile == policy.SandboxReadOnly {
 			return fmt.Errorf("sandbox %s blocks %s", profile, call.Name)
 		}
@@ -534,7 +540,7 @@ func RequiresApproval(name string) bool {
 		return true
 	}
 	switch name {
-	case "bash", "write_file", "create_file", "diff_patch", "replace_lines", "insert_lines", "replace_symbol", "workspace_restore":
+	case "bash", "write_file", "create_file", "edit_file", "diff_patch", "replace_lines", "insert_lines", "replace_symbol", "workspace_restore":
 		return true
 	default:
 		return false

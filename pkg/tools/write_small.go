@@ -11,6 +11,72 @@ import (
 	"klyra/pkg/llm"
 )
 
+type EditFile struct{}
+
+func (EditFile) Spec() llm.ToolSpec {
+	return llm.ToolSpec{
+		Name:        "edit_file",
+		Description: "Edit an existing file by exact text replacement.",
+		Parameters: objectSchema(map[string]any{
+			"path":        stringProperty("Relative file path."),
+			"old":         stringProperty("Exact text to replace."),
+			"new":         stringProperty("Replacement text."),
+			"replace_all": booleanProperty("Replace all occurrences. Defaults to false."),
+		}, "path", "old", "new"),
+	}
+}
+
+func (EditFile) Run(_ context.Context, inv Invocation) (Result, error) {
+	requestedPath, err := stringArg(inv.Args, "path")
+	if err != nil {
+		return Result{}, err
+	}
+	oldText, err := stringArg(inv.Args, "old")
+	if err != nil {
+		return Result{}, err
+	}
+	newText, err := stringArg(inv.Args, "new")
+	if err != nil {
+		return Result{}, err
+	}
+	replaceAll, err := optionalBoolArg(inv.Args, "replace_all", false)
+	if err != nil {
+		return Result{}, err
+	}
+	if oldText == "" {
+		return Result{}, fmt.Errorf("old text cannot be empty")
+	}
+	target, err := safeWorkspacePath(inv.CWD, requestedPath)
+	if err != nil {
+		return Result{}, err
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return Result{}, err
+	}
+	current := string(data)
+	count := strings.Count(current, oldText)
+	if count == 0 {
+		return Result{}, fmt.Errorf("old text not found in %s", requestedPath)
+	}
+	if count > 1 && !replaceAll {
+		return Result{}, fmt.Errorf("old text matches %d times in %s; set replace_all=true or provide a more specific old text", count, requestedPath)
+	}
+	limit := 1
+	if replaceAll {
+		limit = -1
+	}
+	next := strings.Replace(current, oldText, newText, limit)
+	if err := os.WriteFile(target, []byte(next), 0o644); err != nil {
+		return Result{}, err
+	}
+	replaced := 1
+	if replaceAll {
+		replaced = count
+	}
+	return Result{Output: fmt.Sprintf("edited %s: replaced %d occurrence(s)", requestedPath, replaced)}, nil
+}
+
 type ReplaceLines struct{}
 
 func (ReplaceLines) Spec() llm.ToolSpec {
