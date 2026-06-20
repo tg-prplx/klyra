@@ -54,10 +54,17 @@ func TestSpecsForWorkspaceEditModeExposeCreateFileWithoutFocusedEditors(t *testi
 	}
 }
 
-func TestSpecsWithContextCartExposePatchTools(t *testing.T) {
+func TestSpecsWithContextCartExposeFocusedEditTools(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForTaskMode("исправь баг", "edit", []string{"pkg/agent/agent.go"})
-	if !hasSpec(specs, "diff_patch") || !hasSpec(specs, "workspace_checkpoint") || !hasSpec(specs, "read_file") {
-		t.Fatalf("context cart edit should expose heavier edit tools: %+v", specs)
+	for _, name := range []string{"read_file", "replace_lines", "replace_symbol", "insert_lines", "create_file"} {
+		if !hasSpec(specs, name) {
+			t.Fatalf("context cart edit should expose focused tool %s: %+v", name, specs)
+		}
+	}
+	for _, name := range []string{"diff_patch", "diff_preview", "workspace_checkpoint", "bash"} {
+		if hasSpec(specs, name) {
+			t.Fatalf("context cart edit should not expose heavier tool %s: %+v", name, specs)
+		}
 	}
 }
 
@@ -106,20 +113,33 @@ func TestPlanModeBlocksDirectWritesAndExternalMCP(t *testing.T) {
 	}
 }
 
-func TestSpecsHideLegacyWriteFile(t *testing.T) {
+func TestSpecsHideLegacyAndHeavyTools(t *testing.T) {
 	specs := NewDefaultRegistry().Specs()
-	if hasSpec(specs, "write_file") {
-		t.Fatalf("legacy write_file should not be exposed in tool schemas: %+v", specs)
+	for _, name := range []string{
+		"write_file",
+		"guide",
+		"list_files",
+		"read_go_symbol",
+		"diff_preview",
+		"diff_patch",
+		"workspace_checkpoint",
+		"workspace_checkpoints",
+		"workspace_restore",
+		"policy_check",
+	} {
+		if hasSpec(specs, name) {
+			t.Fatalf("heavy/legacy tool %s should not be exposed in tool schemas: %+v", name, specs)
+		}
 	}
 }
 
 func TestSpecsForWebTaskUsesOnlyWebTools(t *testing.T) {
 	specs := NewDefaultRegistry().SpecsForCapabilities("arbitrary text", "", nil, map[string]bool{CapabilityWeb: true})
-	if !hasSpec(specs, "web_search") || !hasSpec(specs, "fetch_url") || !hasSpec(specs, "guide") {
-		t.Fatalf("web capability should expose web tools and guide: %+v", specs)
+	if !hasSpec(specs, "web_search") || !hasSpec(specs, "fetch_url") {
+		t.Fatalf("web capability should expose web tools: %+v", specs)
 	}
-	if hasSpec(specs, "project_map") || hasSpec(specs, "read_file") || hasSpec(specs, "git_status") || hasSpec(specs, "bash") {
-		t.Fatalf("web task should not expose workspace tools: %+v", specs)
+	if hasSpec(specs, "guide") || hasSpec(specs, "project_map") || hasSpec(specs, "read_file") || hasSpec(specs, "git_status") || hasSpec(specs, "bash") {
+		t.Fatalf("web task should not expose non-web tools: %+v", specs)
 	}
 }
 

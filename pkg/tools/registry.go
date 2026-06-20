@@ -148,7 +148,7 @@ func (r *Registry) SpecsForCapabilities(task, mode string, contextFiles []string
 	case "edit":
 		names["create_file"] = true
 	}
-	addCapabilitySpecs(names, capabilities, len(contextFiles) > 0)
+	addCapabilitySpecs(names, capabilities)
 
 	switch mode {
 	case "inspect", "plan":
@@ -258,12 +258,12 @@ func compactSchema(value any) any {
 	}
 }
 
-func addCapabilitySpecs(names map[string]bool, capabilities map[string]bool, hasContextCart bool) {
+func addCapabilitySpecs(names map[string]bool, capabilities map[string]bool) {
 	if capabilities[CapabilityEdit] {
 		capabilities = withCapability(capabilities, CapabilityWorkspace)
 	}
 	if capabilities[CapabilityWorkspace] {
-		for _, name := range []string{"guide", "project_map", "search", "list_files", "file_outline", "read_symbol", "read_go_symbol", "read_file"} {
+		for _, name := range []string{"project_map", "search", "file_outline", "read_symbol", "read_file"} {
 			names[name] = true
 		}
 	}
@@ -271,23 +271,16 @@ func addCapabilitySpecs(names map[string]bool, capabilities map[string]bool, has
 		for _, name := range []string{"create_file", "insert_lines", "replace_lines", "replace_symbol"} {
 			names[name] = true
 		}
-		if hasContextCart {
-			names["diff_patch"] = true
-			names["diff_preview"] = true
-			names["workspace_checkpoint"] = true
-		}
 	}
 	if capabilities[CapabilityGit] {
-		for _, name := range []string{"git_status", "git_diff", "workspace_checkpoint_list"} {
+		for _, name := range []string{"git_status", "git_diff"} {
 			names[name] = true
 		}
 	}
 	if capabilities[CapabilityShell] {
-		names["policy_check"] = true
 		names["bash"] = true
 	}
 	if capabilities[CapabilityWeb] {
-		names["guide"] = true
 		names["web_search"] = true
 		names["fetch_url"] = true
 	}
@@ -312,7 +305,21 @@ func withCapabilities(capabilities map[string]bool, values ...string) map[string
 }
 
 func isHiddenToolSpec(name string) bool {
-	return name == "write_file"
+	switch name {
+	case "write_file",
+		"guide",
+		"list_files",
+		"read_go_symbol",
+		"diff_preview",
+		"diff_patch",
+		"workspace_checkpoint",
+		"workspace_checkpoints",
+		"workspace_restore",
+		"policy_check":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Registry) Run(ctx context.Context, cwd string, call llm.ToolCall) (Result, error) {
@@ -540,7 +547,7 @@ func isMCPTool(name string) bool {
 
 func SuppressRepeatedSuccessfulCall(name string) bool {
 	switch name {
-	case "discover_tools", "project_map", "git_status", "git_diff", "workspace_checkpoint_list", "policy_check",
+	case "discover_tools", "project_map", "git_status", "git_diff", "workspace_checkpoints", "policy_check",
 		"list_files", "read_file", "file_outline", "read_symbol", "read_go_symbol", "search":
 		return true
 	default:
