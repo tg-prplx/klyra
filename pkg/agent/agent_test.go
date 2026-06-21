@@ -429,10 +429,12 @@ func TestAgentAssignsMissingToolCallID(t *testing.T) {
 
 func TestDefaultSystemMessageTellsModelToChangeStrategyAfterToolFailure(t *testing.T) {
 	system := defaultSystemMessage()
-	if !strings.Contains(system, "Do not inspect broad maps") ||
-		!strings.Contains(system, "create the first concrete file directly") ||
-		!strings.Contains(system, "do not repeat the same call") ||
-		!strings.Contains(system, "New files: use create_file") ||
+	if !strings.Contains(system, "Keep replies brief and concrete") ||
+		!strings.Contains(system, "create_file the first concrete file") ||
+		!strings.Contains(system, "Do not repeat the same call or the same tool plan") ||
+		!strings.Contains(system, "workspace-relative paths") ||
+		!strings.Contains(system, "failed tool retry buffer") ||
+		!strings.Contains(system, "Use create_file for whole-file writes") ||
 		!strings.Contains(system, "versatile project assistant") {
 		t.Fatalf("system prompt does not guide failed tool recovery: %s", system)
 	}
@@ -444,8 +446,48 @@ func TestToolObservationAddsRecoveryGuidance(t *testing.T) {
 		tools.Result{Output: "git apply output"},
 		fmt.Errorf("exit status 128"),
 	)
-	if !strings.Contains(observation, "next_action") || !strings.Contains(observation, "edit_file") {
+	if !strings.Contains(observation, "next_action") || !strings.Contains(observation, "edit_file") || !strings.Contains(observation, "retry_buffer") {
 		t.Fatalf("expected recovery guidance in observation: %s", observation)
+	}
+}
+
+func TestAgentIncludesFailedToolRetryBufferInNextRequest(t *testing.T) {
+	call := llm.ToolCall{
+		ID:        "call-1",
+		Name:      "always_fail",
+		Arguments: map[string]any{"path": "missing.txt"},
+	}
+	provider := &scriptedProvider{
+		responses: []llm.Response{
+			{Content: "try", ToolCalls: []llm.ToolCall{call}},
+			{Content: "done"},
+		},
+	}
+	failing := &failingTool{name: "always_fail"}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewRegistry(failing),
+		Output:   io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.RunConversation(context.Background(), nil, "fix"); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.requests) < 2 {
+		t.Fatalf("expected second provider request after failure, got %d", len(provider.requests))
+	}
+	var found bool
+	for _, msg := range provider.requests[1].Messages {
+		if msg.Role == llm.RoleSystem && strings.Contains(msg.Content, "failed_tool_retry_buffer") && strings.Contains(msg.Content, `"Tool":"always_fail"`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected failed tool retry buffer in second request: %+v", provider.requests[1].Messages)
 	}
 }
 
@@ -501,8 +543,101 @@ func TestAgentLoadsProjectInstructionsIntoSystemPrompt(t *testing.T) {
 	if system.Role != llm.RoleSystem || !strings.Contains(system.Content, "Source: AGENTS.md") || !strings.Contains(system.Content, "Use table-driven tests.") {
 		t.Fatalf("project instructions were not loaded into system prompt: %+v", provider.requests[0].Messages)
 	}
-	if !strings.Contains(system.Content, "Current time: ") {
-		t.Fatalf("current time was not injected into system prompt: %s", system.Content)
+	if !strings.Contains(system.Content, "Current date: ") || !strings.Contains(system.Content, "Current working directory: ") {
+		t.Fatalf("runtime context was not injected into system prompt: %s", system.Content)
+	}
+}
+
+func TestAgentSuppressesRepeatedAssistantToolPlanBeforeReexecution(t *testing.T) {
+	call := llm.ToolCall{
+		ID:        "call-1",
+		Name:      "inspect_once",
+		Arguments: map[string]any{"path": "main.py"},
+	}
+	provider := &scriptedProvider{
+		responses: []llm.Response{
+			{Content: "creating file", ToolCalls: []llm.ToolCall{call}},
+			{Content: "creating file", ToolCalls: []llm.ToolCall{{
+				ID:        "call-2",
+				Name:      call.Name,
+				Arguments: call.Arguments,
+			}}},
+			{Content: "done"},
+		},
+	}
+	inspectOnce := &countingTool{name: "inspect_once", output: "same result"}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewRegistry(inspectOnce),
+		Output:   io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := agent.RunConversation(context.Background(), nil, "build a file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Final != "done" {
+		t.Fatalf("unexpected final response: %q", result.Final)
+	}
+	if inspectOnce.calls != 1 {
+		t.Fatalf("expected inspect_once to run once, ran %d times", inspectOnce.calls)
+	}
+	var suppressed bool
+	for _, msg := range result.Messages {
+		if msg.Role == llm.RoleSystem && strings.Contains(msg.Content, "repeated assistant tool plan suppressed") {
+			suppressed = true
+		}
+	}
+	if !suppressed {
+		t.Fatalf("expected repeated assistant plan suppression: %+v", result.Messages)
+	}
+}
+
+func TestAgentSuppressesRedundantDiscoverToolsCall(t *testing.T) {
+	provider := &scriptedProvider{
+		responses: []llm.Response{
+			{ToolCalls: []llm.ToolCall{{
+				ID:        "call-1",
+				Name:      "discover_tools",
+				Arguments: map[string]any{"capabilities": []any{"workspace"}},
+			}}},
+			{ToolCalls: []llm.ToolCall{{
+				ID:        "call-2",
+				Name:      "discover_tools",
+				Arguments: map[string]any{"capabilities": []any{"workspace"}},
+			}}},
+			{Content: "done"},
+		},
+	}
+	agent, err := New(Config{
+		CWD:      t.TempDir(),
+		Provider: provider,
+		Tools:    tools.NewDefaultRegistry(),
+		Output:   io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := agent.RunConversation(context.Background(), nil, "inspect project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Final != "done" {
+		t.Fatalf("unexpected final response: %q", result.Final)
+	}
+	var suppressed bool
+	for _, msg := range result.Messages {
+		if msg.Role == llm.RoleTool && strings.Contains(msg.Content, "repeated discover_tools call suppressed") {
+			suppressed = true
+		}
+	}
+	if !suppressed {
+		t.Fatalf("expected redundant discover_tools suppression: %+v", result.Messages)
 	}
 }
 

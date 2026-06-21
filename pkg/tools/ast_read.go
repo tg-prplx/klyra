@@ -17,7 +17,7 @@ func (FileOutline) Spec() llm.ToolSpec {
 		Name:        "file_outline",
 		Description: "Compact AST outline for one file: language, imports, symbols. Use before read_file.",
 		Parameters: objectSchema(map[string]any{
-			"path": stringProperty("Relative source file path."),
+			"path": stringProperty(workspacePathArgDescription),
 		}, "path"),
 	}
 }
@@ -65,7 +65,7 @@ func (SymbolReader) Spec() llm.ToolSpec {
 		Name:        "read_symbol",
 		Description: "Read one AST symbol with optional surrounding lines. Cheaper than opening the file.",
 		Parameters: objectSchema(map[string]any{
-			"path":          stringProperty("Relative source file path."),
+			"path":          stringProperty(workspacePathArgDescription),
 			"symbol":        stringProperty("Symbol name from project_map or file_outline."),
 			"context_lines": integerProperty("Surrounding lines to include before and after the symbol.", 0),
 		}, "path", "symbol"),

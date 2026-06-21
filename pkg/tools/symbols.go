@@ -19,7 +19,7 @@ func (GoSymbolReader) Spec() llm.ToolSpec {
 		Name:        "read_go_symbol",
 		Description: "Read one Go declaration by name without loading the whole file.",
 		Parameters: objectSchema(map[string]any{
-			"path":   stringProperty("Relative Go file path."),
+			"path":   stringProperty(workspacePathArgDescription),
 			"symbol": stringProperty("Symbol name. Methods can be Type.Method or Method."),
 		}, "path", "symbol"),
 	}

@@ -79,6 +79,24 @@ type ToolProgressEvent struct {
 	Error  string
 }
 
+type failedToolRetry struct {
+	Tool      string
+	Arguments map[string]any
+	Output    string
+	Error     string
+	Guidance  string
+}
+
+type assistantToolPlan struct {
+	Content string                  `json:"content"`
+	Calls   []assistantToolPlanCall `json:"calls,omitempty"`
+}
+
+type assistantToolPlanCall struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments,omitempty"`
+}
+
 type Agent struct {
 	cfg Config
 }
@@ -204,7 +222,7 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	if cockpitErr == nil && cockpitSnapshot.Enabled && cockpitSnapshot.Injected && len(cockpitSnapshot.Cards) > 0 {
 		systemMessage = strings.TrimSpace(systemMessage) + "\n\nContext cockpit fact cards. Use these as a compact starting slice, then verify with tools:\n" + cockpitSnapshot.PromptText()
 	}
-	systemMessage = withCurrentTime(systemMessage, time.Now())
+	systemMessage = withRuntimeContext(systemMessage, a.cfg.CWD, time.Now())
 	systemMessage = withModeInstructions(systemMessage, a.cfg.Mode)
 
 	window := contextmgr.NewBudgetedWindow(a.cfg.MaxMessages, a.cfg.MaxContext)
@@ -230,10 +248,15 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	repeatedReadCalls := map[string]int{}
 	successfulPlanCalls := map[string]tools.Result{}
 	successfulWriteCalls := map[string]int{}
+	retryBuffer := []failedToolRetry{}
 	runCapabilities := map[string]bool{}
 	guideCompleted := false
 	repeatedGuideCalls := 0
 	repeatedPlanCalls := 0
+	repeatedDiscoveryCalls := 0
+	lastAssistantPlan := ""
+	lastAssistantPlanProgressed := true
+	repeatedAssistantPlans := 0
 	for step := 1; step <= a.cfg.MaxSteps; step++ {
 		specs := a.cfg.Tools.SpecsForCapabilities(task, a.cfg.Mode, a.cfg.ContextFiles, runCapabilities)
 		lastDebug = a.contextDebug(specs)
@@ -249,9 +272,13 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			lastDebug.Cockpit = cockpitSnapshot.Markdown()
 			lastDebug.CockpitTokens = cockpitSnapshot.EstimatedTokens
 		}
+		reqMessages := window.Messages()
+		if len(retryBuffer) > 0 {
+			reqMessages = append(reqMessages, llm.Message{Role: llm.RoleSystem, Content: formatFailedToolRetryBuffer(retryBuffer)})
+		}
 		req := llm.Request{
 			Model:           router.SelectModel(a.cfg.Model, a.cfg.ModelRoutes, a.cfg.Mode),
-			Messages:        window.Messages(),
+			Messages:        reqMessages,
 			Tools:           specs,
 			MaxOutputTokens: a.cfg.MaxOutput,
 			ReasoningEffort: a.cfg.Reasoning,
@@ -269,6 +296,19 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			if final != "" && !streamed {
 				fmt.Fprintf(a.cfg.Output, "\nassistant: %s\n", final)
 			}
+			if plan := assistantToolPlanSignature(final, resp.ToolCalls); plan != "" && shouldGuardAssistantToolPlan(resp.ToolCalls) {
+				if plan == lastAssistantPlan && !lastAssistantPlanProgressed {
+					repeatedAssistantPlans++
+				} else {
+					repeatedAssistantPlans = 0
+				}
+				lastAssistantPlan = plan
+				lastAssistantPlanProgressed = false
+			} else {
+				lastAssistantPlan = ""
+				lastAssistantPlanProgressed = true
+				repeatedAssistantPlans = 0
+			}
 			window.Add(llm.Message{Role: llm.RoleAssistant, Content: final, Reasoning: resp.Reasoning, ToolCalls: resp.ToolCalls})
 		}
 
@@ -276,13 +316,44 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			a.printUsage(lastUsage)
 			return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, nil
 		}
+		if repeatedAssistantPlans >= 1 {
+			err := fmt.Errorf("repeated assistant tool plan suppressed; the same content and tool calls already failed to make progress; call a different tool, change arguments, or answer the user")
+			window.Add(llm.Message{Role: llm.RoleSystem, Content: err.Error()})
+			if repeatedAssistantPlans >= 2 {
+				a.printUsage(lastUsage)
+				return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, fmt.Errorf("agent stopped after repeated assistant tool-plan loop")
+			}
+			continue
+		}
 
+		stepProgressed := false
 		for _, call := range resp.ToolCalls {
 			fmt.Fprintf(a.cfg.Output, "tool: %s\n", call.Name)
 			if err := a.emitToolProgress(ToolProgressEvent{Phase: "queued", Tool: call.Name, ID: call.ID, Args: call.Arguments}); err != nil {
 				return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, err
 			}
 			signature := toolCallSignature(call)
+			if call.Name == "discover_tools" {
+				capabilities, capabilityErr := tools.RequestedCapabilities(call.Arguments)
+				if capabilityErr != nil {
+					return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, capabilityErr
+				}
+				if capabilitiesAlreadyUnlocked(runCapabilities, capabilities) {
+					repeatedDiscoveryCalls++
+					err := fmt.Errorf("repeated discover_tools call suppressed; those capabilities are already visible; use a concrete tool or answer the user")
+					observation := toolObservation(call, tools.Result{Output: "already unlocked: " + strings.Join(capabilities, ", ")}, err)
+					window.Add(llm.Message{Role: llm.RoleTool, ToolCallID: call.ID, Content: observation})
+					fmt.Fprintf(a.cfg.Output, "tool error: %v\n", err)
+					if progressErr := a.emitToolProgress(ToolProgressEvent{Phase: "error", Tool: call.Name, ID: call.ID, Args: call.Arguments, Output: "already unlocked: " + strings.Join(capabilities, ", "), Error: err.Error()}); progressErr != nil {
+						return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, progressErr
+					}
+					if repeatedDiscoveryCalls >= 2 {
+						a.printUsage(lastUsage)
+						return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, fmt.Errorf("agent stopped after repeated discover_tools loop")
+					}
+					continue
+				}
+			}
 			if previous, repeated := successfulPlanCalls[signature]; call.Name == "update_plan" && repeated {
 				repeatedPlanCalls++
 				err := fmt.Errorf("repeated update_plan call suppressed; this exact plan is already current; make progress, update changed statuses, or answer the user")
@@ -369,13 +440,19 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 				if capabilityErr != nil {
 					return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, capabilityErr
 				}
+				if !capabilitiesAlreadyUnlocked(runCapabilities, capabilities) {
+					stepProgressed = true
+				}
 				for _, capability := range capabilities {
 					runCapabilities[capability] = true
 				}
+				repeatedDiscoveryCalls = 0
 			}
 			if err == nil && tools.HasSideEffects(call.Name) {
 				successfulReadCalls = map[string]tools.Result{}
 				repeatedReadCalls = map[string]int{}
+				retryBuffer = nil
+				stepProgressed = true
 				if call.Name == "create_file" || call.Name == "write_file" {
 					successfulWriteCalls[signature]++
 					if successfulWriteCalls[signature] >= 3 {
@@ -385,9 +462,11 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 				}
 			} else if err == nil && tools.SuppressRepeatedSuccessfulCall(call.Name) {
 				successfulReadCalls[signature] = result
+				retryBuffer = nil
 			}
 			if err != nil {
 				failedToolCalls[signature] = result
+				retryBuffer = recordFailedToolRetry(retryBuffer, call, result, err)
 				fmt.Fprintf(a.cfg.Output, "tool error: %v\n", err)
 			}
 			phase := "done"
@@ -400,6 +479,7 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 				return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, progressErr
 			}
 		}
+		lastAssistantPlanProgressed = stepProgressed
 	}
 	return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, fmt.Errorf("agent stopped after %d steps", a.cfg.MaxSteps)
 }
@@ -600,12 +680,79 @@ func toolObservation(call llm.ToolCall, result tools.Result, runErr error) strin
 		if guidance := toolErrorGuidance(call, result, runErr); guidance != "" {
 			payload["next_action"] = guidance
 		}
+		payload["retry_buffer"] = map[string]any{
+			"tool":                     call.Name,
+			"arguments":                call.Arguments,
+			"edit_and_retry_same_tool": true,
+		}
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return result.Output
 	}
 	return string(data)
+}
+
+func recordFailedToolRetry(buffer []failedToolRetry, call llm.ToolCall, result tools.Result, runErr error) []failedToolRetry {
+	entry := failedToolRetry{
+		Tool:      call.Name,
+		Arguments: cloneArgs(call.Arguments),
+		Output:    result.Output,
+		Error:     runErr.Error(),
+		Guidance:  toolErrorGuidance(call, result, runErr),
+	}
+	signature := toolCallSignature(call)
+	out := make([]failedToolRetry, 0, min(len(buffer)+1, 3))
+	out = append(out, entry)
+	for _, existing := range buffer {
+		if signature == toolCallSignature(llm.ToolCall{Name: existing.Tool, Arguments: existing.Arguments}) {
+			continue
+		}
+		out = append(out, existing)
+		if len(out) == 3 {
+			break
+		}
+	}
+	return out
+}
+
+func formatFailedToolRetryBuffer(buffer []failedToolRetry) string {
+	if len(buffer) == 0 {
+		return ""
+	}
+	payload := map[string]any{
+		"type":  "failed_tool_retry_buffer",
+		"usage": "If a failed tool is still the right tool, edit only the arguments and retry once. Identical failed calls are suppressed; changed arguments are allowed.",
+		"items": buffer,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func cloneArgs(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return mapsClone(args)
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return mapsClone(args)
+	}
+	return cloned
+}
+
+func mapsClone(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func ensureToolCallIDs(calls []llm.ToolCall, step int) []llm.ToolCall {
@@ -636,20 +783,66 @@ func toolCallSignature(call llm.ToolCall) string {
 	return call.Name + ":" + string(data)
 }
 
+func assistantToolPlanSignature(content string, calls []llm.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	normalized := assistantToolPlan{Content: strings.TrimSpace(content)}
+	for _, call := range calls {
+		normalized.Calls = append(normalized.Calls, assistantToolPlanCall{
+			Name:      call.Name,
+			Arguments: cloneArgs(call.Arguments),
+		})
+	}
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return normalized.Content
+	}
+	return string(data)
+}
+
+func shouldGuardAssistantToolPlan(calls []llm.ToolCall) bool {
+	if len(calls) == 0 {
+		return false
+	}
+	for _, call := range calls {
+		switch call.Name {
+		case "discover_tools", "guide", "update_plan":
+			return false
+		}
+		if tools.SuppressRepeatedSuccessfulCall(call.Name) || tools.HasSideEffects(call.Name) {
+			return false
+		}
+	}
+	return true
+}
+
+func capabilitiesAlreadyUnlocked(current map[string]bool, requested []string) bool {
+	if len(requested) == 0 {
+		return false
+	}
+	for _, capability := range requested {
+		if !current[capability] {
+			return false
+		}
+	}
+	return true
+}
+
 func defaultSystemMessage() string {
 	return strings.TrimSpace(`You are Klyra, a versatile project assistant.
-Use tools deliberately:
+Keep replies brief and concrete.
+Use the smallest useful tool and the smallest useful context.
 - If a needed tool is hidden, call discover_tools once with the smallest capability set.
-- Prefer built-in tools over bash; use bash only when no built-in tool fits.
-- Do not inspect broad maps, sessions, logs, .env, or unrelated files without need.
-- Existing files: ALWAYS use edit_file. New files: use create_file. NEVER use create_file or write_file to overwrite an existing file.
-- If create_file or write_file is rejected because the file exists, switch to edit_file immediately. Do not retry the same tool.
-- For new projects, create the first concrete file directly; do not loop on empty project_map.
-- For existing code, gather the smallest slice: project_map/search -> outline/symbol -> short read_file.
-- After a tool failure or duplicate result, change strategy once; do not repeat the same call with the same arguments.
-- After two consecutive failures on the same tool, stop and answer the user with what you know.
-- Verify with the cheapest relevant check, then answer with changed files, checks, and residual risk.
-- Never edit outside the workspace.`)
+- Prefer built-in tools over bash.
+- For existing code: project_map/search -> file_outline/read_symbol -> short read_file.
+- For new work or an empty project: create_file the first concrete file instead of re-mapping.
+- Prefer workspace-relative paths. Absolute paths are allowed only when they still stay inside the workspace.
+- Use create_file for whole-file writes. Use edit_file for existing files and focused changes.
+- After a failure, duplicate result, or blocked call, change arguments or change tools once. Do not repeat the same call or the same tool plan.
+- If a failed tool retry buffer is present, edit that tool's arguments and retry once before switching strategies.
+- If two consecutive attempts make no progress, stop using tools and answer with the blocker, changed files, checks, and next step.
+- Do not inspect unrelated secrets, sessions, logs, or edit outside the workspace.`)
 }
 
 func withModeInstructions(base, mode string) string {
@@ -690,8 +883,11 @@ func toolErrorGuidance(call llm.ToolCall, result tools.Result, runErr error) str
 	case "update_plan":
 		return "Do not repeat the same plan. Continue the work, change step statuses when progress changes, or answer the user."
 	}
+	if strings.Contains(text, "path escapes workspace") {
+		return "Keep the path inside the current workspace. Prefer a workspace-relative path."
+	}
 	if strings.Contains(text, "repeated failed tool call suppressed") {
-		return "Choose a different tool or change the arguments before continuing."
+		return "Change the arguments before retrying the same tool, or choose a different focused tool."
 	}
 	if strings.Contains(text, "repeated read-only tool call suppressed") {
 		return "Use the previous output. Choose a different focused tool, perform the next concrete action, or answer the user."
@@ -741,8 +937,10 @@ func withSkills(base string, loaded skills.Result) string {
 	return builder.String()
 }
 
-func withCurrentTime(base string, now time.Time) string {
-	return strings.TrimSpace(base) + "\n\nCurrent time: " + now.Format(time.RFC3339)
+func withRuntimeContext(base, cwd string, now time.Time) string {
+	return strings.TrimSpace(base) +
+		"\n\nCurrent date: " + now.Format("2006-01-02") +
+		"\nCurrent working directory: " + filepath.ToSlash(cwd)
 }
 
 func sanitizeMessagesForStorage(messages []llm.Message) []llm.Message {

@@ -11,15 +11,16 @@ func safeWorkspacePath(cwd, requested string) (string, error) {
 	if strings.TrimSpace(requested) == "" {
 		return "", fmt.Errorf("path cannot be empty")
 	}
-	if filepath.IsAbs(requested) {
-		return "", fmt.Errorf("absolute paths are not allowed: %s", requested)
-	}
-
 	root, err := filepath.Abs(cwd)
 	if err != nil {
 		return "", err
 	}
-	target, err := filepath.Abs(filepath.Join(root, filepath.Clean(requested)))
+	cleaned := filepath.Clean(requested)
+	targetInput := cleaned
+	if !filepath.IsAbs(cleaned) {
+		targetInput = filepath.Join(root, cleaned)
+	}
+	target, err := filepath.Abs(targetInput)
 	if err != nil {
 		return "", err
 	}

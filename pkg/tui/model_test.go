@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -863,6 +864,29 @@ func TestToolProgressRendersLive(t *testing.T) {
 	}
 }
 
+func TestToolProgressFormatsCreateFileContentAsCodeBlock(t *testing.T) {
+	model := New(Config{})
+	raw, err := json.Marshal(ToolProgressMsg{
+		Phase: "running",
+		Tool:  "create_file",
+		Args: map[string]any{
+			"path":    "main.go",
+			"content": "package main\n\nfunc main() {\n\tprintln(\"hi\")\n}",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := model.renderToolProgressLine("toolprogress:1:" + string(raw))
+	view := stripANSI(strings.Join(lines, "\n"))
+	if strings.Contains(view, `\n`) {
+		t.Fatalf("expected formatted multiline content instead of escaped newlines:\n%s", view)
+	}
+	if !strings.Contains(view, "content:") || !strings.Contains(view, "package main") || !strings.Contains(view, "func main()") {
+		t.Fatalf("expected code block style preview for create_file args:\n%s", view)
+	}
+}
+
 func TestToolStreamDeltasAggregateIntoOneCollapsedLine(t *testing.T) {
 	model := New(Config{})
 	updated, _ := model.Update(ToolStreamMsg{Index: 0, ID: "call-1", Name: "read_file", Arguments: "{\"path\""})
@@ -891,6 +915,40 @@ func TestToolStreamDeltasAggregateIntoOneCollapsedLine(t *testing.T) {
 	}
 	if !strings.Contains(view, "README.md") {
 		t.Fatalf("tool stream summary should include compact args:\n%s", view)
+	}
+}
+
+func TestToolStreamFormatsPartialCodeWhileStreaming(t *testing.T) {
+	model := New(Config{})
+	raw, err := json.Marshal(ToolStreamMsg{
+		Index:     0,
+		ID:        "call-1",
+		Name:      "create_file",
+		Arguments: "{\"path\":\"main.go\",\"content\":\"package main\\n\\nfunc ma",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := model.renderToolStreamLine("toolstream:1:" + string(raw))
+	view := stripANSI(strings.Join(lines, "\n"))
+	if strings.Contains(view, `\n`) {
+		t.Fatalf("expected partial streamed code to be expanded, not shown as escaped json:\n%s", view)
+	}
+	if !strings.Contains(view, "content:") || !strings.Contains(view, "package main") || !strings.Contains(view, "func ma") {
+		t.Fatalf("expected structured preview for partial streamed args:\n%s", view)
+	}
+}
+
+func TestFormatApprovalArgsExpandsCodeFields(t *testing.T) {
+	preview := formatApprovalArgs(map[string]any{
+		"path":    "script.py",
+		"content": "print('a')\nprint('b')",
+	}, 80, 20)
+	if strings.Contains(preview, `\n`) {
+		t.Fatalf("expected approval preview to expand newlines:\n%s", preview)
+	}
+	if !strings.Contains(preview, "content:") || !strings.Contains(preview, "```python") || !strings.Contains(preview, "print('a')") {
+		t.Fatalf("expected approval preview to include fenced code block:\n%s", preview)
 	}
 }
 
@@ -1067,6 +1125,84 @@ func TestModelHistoryNavigation(t *testing.T) {
 	}
 }
 
+func TestTextareaHistoryRoutingOnlyAtInputEdges(t *testing.T) {
+	model := New(Config{})
+	model.history = []string{"older command"}
+	model.historyIdx = len(model.history)
+
+	model.input.SetValue("first line\nsecond line\nthird line")
+	model.syncInputSize()
+
+	model.input.CursorUp()
+	if model.shouldRouteUpToHistory() {
+		t.Fatalf("up should stay inside textarea when cursor is not on the first line")
+	}
+	if model.shouldRouteDownToHistory() {
+		t.Fatalf("down should stay inside textarea when cursor is not on the last line")
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m := updated.(Model)
+	if m.input.Value() != "first line\nsecond line\nthird line" {
+		t.Fatalf("textarea navigation should not replace multiline input, got %q", m.input.Value())
+	}
+	if m.input.Line() != 0 {
+		t.Fatalf("expected cursor to move to first line, got line %d", m.input.Line())
+	}
+	if !m.shouldRouteUpToHistory() {
+		t.Fatalf("up should route to history on the first line")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.input.Value() != "older command" {
+		t.Fatalf("expected history entry on up from first line, got %q", m.input.Value())
+	}
+
+	model = New(Config{})
+	model.history = []string{"older command"}
+	model.historyIdx = len(model.history)
+	model.input.SetValue("first line\nsecond line\nthird line")
+	model.syncInputSize()
+	model.input.CursorUp()
+	if model.shouldRouteDownToHistory() {
+		t.Fatalf("down should stay inside textarea when cursor is not on the last line")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.input.Value() != "first line\nsecond line\nthird line" {
+		t.Fatalf("textarea navigation should preserve multiline input on down, got %q", m.input.Value())
+	}
+	if m.input.Line() != 2 {
+		t.Fatalf("expected cursor to move to last line, got line %d", m.input.Line())
+	}
+	if !m.shouldRouteDownToHistory() {
+		t.Fatalf("down should route to history on the last line")
+	}
+}
+
+func TestTextareaSoftWrapExpandsHeightAndCapsAtFourLines(t *testing.T) {
+	model := New(Config{})
+	model.width = 26
+	model.height = 24
+	model.input.SetValue(strings.Repeat("wrap ", 20))
+	model.syncInputSize()
+
+	if model.input.LineCount() != 1 {
+		t.Fatalf("expected one hard line, got %d", model.input.LineCount())
+	}
+	if got := model.input.Height(); got <= 1 {
+		t.Fatalf("expected soft wrap to increase textarea height, got %d", got)
+	}
+	if got := model.input.Height(); got != 4 {
+		t.Fatalf("expected textarea height cap at 4 lines, got %d", got)
+	}
+	if got := model.inputVisualLineCount(); got != 4 {
+		t.Fatalf("expected visual line count cap at 4, got %d", got)
+	}
+}
+
 func TestMouseWheelScrollsChat(t *testing.T) {
 	model := New(Config{})
 	for i := 0; i < 80; i++ {
@@ -1220,7 +1356,10 @@ func TestF6TogglesCopyModeMouseCapture(t *testing.T) {
 		t.Fatal("expected copy mode after F6")
 	}
 	if cmd == nil {
-		t.Fatal("expected DisableMouse command")
+		t.Fatal("expected mouse mode command")
+	}
+	if got := fmt.Sprintf("%T", executeCmd(cmd)); !strings.Contains(got, "enableMouseAllMotionMsg") {
+		t.Fatalf("expected EnableMouseAllMotion command, got %s", got)
 	}
 
 	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyF6})
@@ -1230,6 +1369,93 @@ func TestF6TogglesCopyModeMouseCapture(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected EnableMouseCellMotion command")
+	}
+	if got := fmt.Sprintf("%T", executeCmd(cmd)); !strings.Contains(got, "enableMouseCellMotionMsg") {
+		t.Fatalf("expected EnableMouseCellMotion command, got %s", got)
+	}
+}
+
+func TestCopyModeDragCopiesSelectionToClipboard(t *testing.T) {
+	model := New(Config{})
+	model.width = 80
+	model.height = 24
+	model.lines = []string{"system: alpha", "system: bravo", "system: charlie"}
+	model.syncViewport(true)
+
+	var copied string
+	origWriteClipboard := writeClipboard
+	writeClipboard = func(text string) error {
+		copied = text
+		return nil
+	}
+	defer func() { writeClipboard = origWriteClipboard }()
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF6})
+	m := updated.(Model)
+	if !m.copyMode {
+		t.Fatal("expected copy mode to be enabled")
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{
+		X:      4,
+		Y:      m.viewport.Height - 3,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+		Type:   tea.MouseLeft,
+	})
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.MouseMsg{
+		X:      8,
+		Y:      m.viewport.Height - 2,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionMotion,
+		Type:   tea.MouseMotion,
+	})
+	m = updated.(Model)
+
+	updated, cmd := m.Update(tea.MouseMsg{
+		X:      8,
+		Y:      m.viewport.Height - 2,
+		Button: tea.MouseButtonNone,
+		Action: tea.MouseActionRelease,
+		Type:   tea.MouseRelease,
+	})
+	m = updated.(Model)
+	if !m.copySelectionActive {
+		t.Fatal("expected copy selection to remain active after drag release")
+	}
+	msg := executeCmd(cmd)
+	copyMsg, ok := msg.(copyResultMsg)
+	if !ok {
+		t.Fatalf("expected copy result message, got %T", msg)
+	}
+	updated, _ = m.Update(copyMsg)
+	m = updated.(Model)
+	if copied == "" {
+		t.Fatal("expected clipboard write after selection release")
+	}
+	if !strings.Contains(copied, "alpha") || !strings.Contains(copied, "brav") {
+		t.Fatalf("expected multiline copied selection, got %q", copied)
+	}
+	if !strings.Contains(stripANSI(m.renderFooter()), "copied") {
+		t.Fatalf("expected copy notification in footer, got %q", stripANSI(m.renderFooter()))
+	}
+}
+
+func TestRenderCopySelectionLineStripsANSISequences(t *testing.T) {
+	model := New(Config{})
+	model.copySelectionActive = true
+	model.copySelectionStart = copyPoint{index: 0, col: 0}
+	model.copySelectionEnd = copyPoint{index: 0, col: 6}
+	line := "\x1b[1;38;2;96;165;250m>Create\x1b[0m also"
+	rendered := model.renderCopySelectionLine(line, 0)
+	plain := stripANSI(rendered)
+	if strings.Contains(plain, "38;2;96;165;250m") || strings.Contains(plain, "1;38;2;96;165;250m") {
+		t.Fatalf("expected ANSI parameters to stay invisible, got %q", plain)
+	}
+	if !strings.Contains(plain, ">Create also") {
+		t.Fatalf("expected visible text to remain, got %q", plain)
 	}
 }
 

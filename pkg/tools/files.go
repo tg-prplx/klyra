@@ -14,6 +14,8 @@ import (
 
 type ListFiles struct{}
 
+const workspacePathArgDescription = "Workspace-relative path preferred. Absolute path inside the current workspace is also accepted."
+
 func (ListFiles) Spec() llm.ToolSpec {
 	return llm.ToolSpec{
 		Name:        "list_files",
@@ -95,7 +97,7 @@ func (FileReader) Spec() llm.ToolSpec {
 		Name:        "read_file",
 		Description: "Read a file slice. Prefer file_outline/read_symbol first; keep slices near 100 lines.",
 		Parameters: objectSchema(map[string]any{
-			"path":       stringProperty("Relative file path."),
+			"path":       stringProperty(workspacePathArgDescription),
 			"start_line": integerProperty("1-based start line.", 1),
 			"max_lines":  integerProperty("Maximum lines to return.", 1),
 		}, "path"),
@@ -149,7 +151,7 @@ func (FileWriter) Spec() llm.ToolSpec {
 		Name:        "write_file",
 		Description: "Disabled legacy full-file writer. Use create_file for new files and edit_file for existing files.",
 		Parameters: objectSchema(map[string]any{
-			"path":    stringProperty("Relative file path."),
+			"path":    stringProperty(workspacePathArgDescription),
 			"content": stringProperty("Complete file content."),
 		}, "path", "content"),
 	}
@@ -184,7 +186,7 @@ func (FileCreator) Spec() llm.ToolSpec {
 		Name:        "create_file",
 		Description: "Write a complete file, replacing existing content if present. For focused changes, use edit_file.",
 		Parameters: objectSchema(map[string]any{
-			"path":        stringProperty("Relative file path."),
+			"path":        stringProperty(workspacePathArgDescription),
 			"content":     stringProperty("Complete file content."),
 			"description": stringProperty("Short internal note for this file, shown beside it in file lists."),
 		}, "path", "content"),

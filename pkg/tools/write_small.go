@@ -18,7 +18,7 @@ func (EditFile) Spec() llm.ToolSpec {
 		Name:        "edit_file",
 		Description: "Edit an existing file by exact text replacement.",
 		Parameters: objectSchema(map[string]any{
-			"path":        stringProperty("Relative file path."),
+			"path":        stringProperty(workspacePathArgDescription),
 			"old":         stringProperty("Exact text to replace."),
 			"new":         stringProperty("Replacement text."),
 			"replace_all": booleanProperty("Replace all occurrences. Defaults to false."),
@@ -84,7 +84,7 @@ func (ReplaceLines) Spec() llm.ToolSpec {
 		Name:        "replace_lines",
 		Description: "Replace a small inclusive line range. Prefer over write_file for focused edits.",
 		Parameters: objectSchema(map[string]any{
-			"path":       stringProperty("Relative file path."),
+			"path":       stringProperty(workspacePathArgDescription),
 			"start_line": integerProperty("1-based first line to replace.", 1),
 			"end_line":   integerProperty("1-based last line to replace, inclusive.", 1),
 			"content":    stringProperty("Replacement text for the range."),
@@ -141,7 +141,7 @@ func (InsertLines) Spec() llm.ToolSpec {
 		Name:        "insert_lines",
 		Description: "Insert a small text block after a line. Use after_line=0 for file start.",
 		Parameters: objectSchema(map[string]any{
-			"path":       stringProperty("Relative file path."),
+			"path":       stringProperty(workspacePathArgDescription),
 			"after_line": integerProperty("Insert after this 1-based line; use 0 for file start.", 0),
 			"content":    stringProperty("Text to insert."),
 		}, "path", "after_line", "content"),
@@ -190,7 +190,7 @@ func (ReplaceSymbol) Spec() llm.ToolSpec {
 		Name:        "replace_symbol",
 		Description: "Replace one function/class/type symbol by AST range. Best for function-level edits.",
 		Parameters: objectSchema(map[string]any{
-			"path":    stringProperty("Relative source file path."),
+			"path":    stringProperty(workspacePathArgDescription),
 			"symbol":  stringProperty("Symbol name from project_map ast_symbols, e.g. UserCard or Server.Login."),
 			"content": stringProperty("Replacement source for the whole symbol."),
 		}, "path", "symbol", "content"),

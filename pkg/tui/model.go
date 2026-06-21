@@ -8,15 +8,18 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	termansi "github.com/charmbracelet/x/ansi"
 )
 
 // ---------------------------------------------------------------------------
@@ -118,6 +121,18 @@ type CommandDef struct {
 	Name        string
 	Description string
 }
+
+type copyPoint struct {
+	index int
+	col   int
+}
+
+type copyResultMsg struct {
+	err   error
+	chars int
+}
+
+var writeClipboard = clipboard.WriteAll
 
 type Config struct {
 	CWD                    string
@@ -221,7 +236,7 @@ type Model struct {
 	handler                Handler
 	interrupt              InterruptFunc
 	pickerProvider         PickerProvider
-	input                  textinput.Model
+	input                  textarea.Model
 	lines                  []string
 	width                  int
 	height                 int
@@ -243,6 +258,11 @@ type Model struct {
 	reasoningText          string
 	reasonExpanded         bool
 	copyMode               bool
+	copyDragActive         bool
+	copySelectionActive    bool
+	copySelectionStart     copyPoint
+	copySelectionEnd       copyPoint
+	copyNotice             string
 	interrupted            bool
 	mouseFragmentTTL       int
 	sidebarVisible         bool
@@ -281,14 +301,24 @@ type SessionLoadedMsg struct {
 }
 
 func New(cfg Config) Model {
-	input := textinput.New()
+	input := textarea.New()
 	input.Placeholder = "Ask anything or type / for commands..."
 	input.Prompt = "  ◆ "
-	input.PromptStyle = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
-	input.TextStyle = lipgloss.NewStyle().Foreground(colorWhite)
+	input.ShowLineNumbers = false
+	input.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+	input.BlurredStyle.Prompt = lipgloss.NewStyle().Foreground(colorBrand).Bold(true)
+	input.FocusedStyle.Text = lipgloss.NewStyle().Foreground(colorWhite)
+	input.BlurredStyle.Text = lipgloss.NewStyle().Foreground(colorWhite)
 	input.Cursor.Style = lipgloss.NewStyle().Foreground(colorBrand)
 	input.Cursor.Blink = false
-	input.PlaceholderStyle = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	input.FocusedStyle.Placeholder = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	input.BlurredStyle.Placeholder = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	input.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	input.BlurredStyle.CursorLine = lipgloss.NewStyle()
+	input.FocusedStyle.CursorLineNumber = lipgloss.NewStyle()
+	input.BlurredStyle.CursorLineNumber = lipgloss.NewStyle()
+	input.SetHeight(1)
+	input.SetWidth(74)
 	input.Focus()
 	input.CharLimit = 8000
 
@@ -369,6 +399,7 @@ func New(cfg Config) Model {
 	}
 	m.width = 80
 	m.height = 24
+	m.syncInputSize()
 	m.syncViewport(true)
 	return m
 }
@@ -382,7 +413,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.input.Width = max(20, msg.Width-6)
+		m.syncInputSize()
 		m.renderer, _ = glamour.NewTermRenderer(
 			glamour.WithStandardStyle("dark"),
 			glamour.WithPreservedNewLines(),
@@ -397,7 +428,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tickSpinner()
 		}
 		return m, nil
+	case copyResultMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.copyNotice = "copy failed"
+		} else if msg.chars > 0 {
+			m.copyNotice = fmt.Sprintf("copied %d chars", msg.chars)
+		} else {
+			m.copyNotice = "copied"
+		}
+		return m, nil
 	case tea.MouseMsg:
+		if m.copyMode {
+			if handled, cmd := m.handleCopyModeMouse(msg); handled {
+				return m, cmd
+			}
+		}
 		// If mouse event is in the sidebar area, consume it entirely so that
 		// the viewport below never sees it (prevents chat from scrolling when
 		// the user scrolls inside the sidebar).
@@ -491,9 +537,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f6":
 			m.copyMode = !m.copyMode
 			if m.copyMode {
-				return m, tea.Batch(tea.DisableMouse, tea.ExitAltScreen)
+				m.clearCopySelection()
+				m.copyNotice = ""
+				m.syncViewport(false)
+				return m, tea.EnableMouseAllMotion
 			}
-			return m, tea.Batch(tea.EnterAltScreen, tea.EnableMouseCellMotion)
+			m.clearCopySelection()
+			m.copyNotice = ""
+			m.syncViewport(false)
+			return m, tea.EnableMouseCellMotion
 		case "f7":
 			m.sidebarMode = (m.sidebarMode + 1) % 3
 			m.sidebarVisible = true
@@ -541,7 +593,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			return m.historyPrevious()
+			if m.shouldRouteUpToHistory() {
+				return m.historyPrevious()
+			}
 		case "shift+tab":
 			if len(m.filteredCmds) > 0 {
 				m.selectedCmdIdx--
@@ -558,7 +612,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			return m.historyNext()
+			if m.shouldRouteDownToHistory() {
+				return m.historyNext()
+			}
 		case "tab":
 			if len(m.filteredCmds) > 0 {
 				m.selectedCmdIdx++
@@ -567,6 +623,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+		case "shift+enter":
+			m.input.InsertRune('\n')
+			m.syncInputSize()
+			m.updateCompletions()
+			return m, nil
 		case "ctrl+up", "ctrl+p":
 			return m.historyPrevious()
 		case "ctrl+down", "ctrl+n":
@@ -575,6 +636,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.filteredCmds) > 0 {
 				m.input.SetValue(m.filteredCmds[m.selectedCmdIdx].Name + " ")
 				m.input.SetCursor(len(m.input.Value()))
+				m.syncInputSize()
 				m.filteredCmds = nil
 				return m, nil
 			}
@@ -594,6 +656,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tempInput = ""
 
 			m.input.SetValue("")
+			m.syncInputSize()
 			m.filteredCmds = nil
 			if value == "/exit" || value == "/quit" {
 				return m, tea.Quit
@@ -824,6 +887,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.input.Value() != prevVal {
+		m.syncInputSize()
 		m.updateCompletions()
 	}
 
@@ -845,6 +909,46 @@ func (m *Model) updateCompletions() {
 			}
 		}
 	}
+}
+
+func (m *Model) syncInputSize() {
+	m.input.SetWidth(max(20, m.width-6))
+	lines := m.inputVisualLineCount()
+	m.input.SetHeight(lines)
+}
+
+func (m Model) inputVisualLineCount() int {
+	width := m.input.Width() - lipgloss.Width(m.input.Prompt)
+	if width < 1 {
+		width = 1
+	}
+	lines := 0
+	for _, hardLine := range strings.Split(m.input.Value(), "\n") {
+		lineWidth := termansi.StringWidth(hardLine)
+		wrapped := max(1, (lineWidth+width-1)/width)
+		lines += wrapped
+	}
+	if lines < 1 {
+		lines = 1
+	}
+	if lines > 4 {
+		lines = 4
+	}
+	return lines
+}
+
+func (m Model) shouldRouteUpToHistory() bool {
+	if m.input.LineCount() <= 1 {
+		return true
+	}
+	return m.input.Line() == 0
+}
+
+func (m Model) shouldRouteDownToHistory() bool {
+	if m.input.LineCount() <= 1 {
+		return true
+	}
+	return m.input.Line() >= m.input.LineCount()-1
 }
 
 func (m Model) isMouseEscapeKeyMsg(msg tea.KeyMsg) bool {
@@ -886,7 +990,7 @@ func isCancelError(err error) bool {
 
 func (m Model) calculateBodyHeight() int {
 	footerHeight := 2 // separator + footer text
-	inputHeight := 2  // separator + input text
+	inputHeight := 1 + m.inputVisualLineCount()
 	autocompleteHeight := 0
 	if len(m.filteredCmds) > 0 {
 		maxItems := 5
@@ -1114,16 +1218,17 @@ func (m *Model) syncViewport(scrollToBottom bool) {
 	m.viewport.Width = m.chatWidth()
 	m.viewport.Height = m.calculateBodyHeight()
 
-	lines := m.buildFormattedLines()
-	padding := m.viewport.Height - len(lines)
+	items := m.buildFormattedLineItems()
+	padding := m.viewport.Height - len(items)
 	if padding > 0 {
-		paddedLines := make([]string, padding)
-		for i := range paddedLines {
-			paddedLines[i] = ""
+		paddedItems := make([]formattedLineItem, padding)
+		for i := range paddedItems {
+			paddedItems[i] = formattedLineItem{source: lineSourceNone}
 		}
-		lines = append(paddedLines, lines...)
+		items = append(paddedItems, items...)
 	}
 
+	lines := m.renderViewportLines(items)
 	m.viewport.SetContent(strings.Join(lines, "\n"))
 	if scrollToBottom {
 		m.viewport.GotoBottom()
@@ -1734,15 +1839,24 @@ func formatApprovalArgs(args map[string]any, width, maxLines int) string {
 	if width > 140 {
 		width = 140
 	}
-	sanitized := sanitizeApprovalValue("", args)
-	var builder strings.Builder
-	encoder := json.NewEncoder(&builder)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(sanitized); err != nil {
-		return ""
+	var lines []string
+	for _, section := range buildToolPreviewSections("", args, true) {
+		lines = append(lines, section.Label+":")
+		valueLines := strings.Split(strings.TrimRight(section.Value, "\n"), "\n")
+		if section.Code {
+			if lang := strings.TrimSpace(section.Language); lang != "" {
+				lines = append(lines, "```"+lang)
+			} else {
+				lines = append(lines, "```")
+			}
+			lines = append(lines, valueLines...)
+			lines = append(lines, "```")
+		} else {
+			for _, line := range valueLines {
+				lines = append(lines, "  "+line)
+			}
+		}
 	}
-	lines := strings.Split(strings.TrimSpace(builder.String()), "\n")
 	if maxLines <= 0 {
 		maxLines = 18
 	}
@@ -2431,6 +2545,9 @@ func (m Model) renderFooter() string {
 		} else {
 			hints = append([]string{"F3 context"}, hints...)
 		}
+	}
+	if strings.TrimSpace(m.copyNotice) != "" {
+		hints = append(hints, m.copyNotice)
 	}
 	settingsHint := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(hints, "  "))
 	rightFooter := modelStyle.Render(valueOr(m.model, "routed")) + "  " + settingsHint + " "
@@ -3131,11 +3248,7 @@ func (m *Model) handleViewportClick(y int) bool {
 
 func (m Model) currentViewportLines() []string {
 	items := m.currentViewportItems()
-	lines := make([]string, 0, len(items))
-	for _, item := range items {
-		lines = append(lines, item.text)
-	}
-	return lines
+	return m.renderViewportLines(items)
 }
 
 func (m Model) currentViewportItems() []formattedLineItem {
@@ -3151,23 +3264,190 @@ func (m Model) currentViewportItems() []formattedLineItem {
 	return items
 }
 
-func stripANSICodes(value string) string {
-	var out strings.Builder
-	inEscape := false
-	for _, r := range value {
-		if inEscape {
-			if r >= '@' && r <= '~' {
-				inEscape = false
-			}
+func (m Model) renderViewportLines(items []formattedLineItem) []string {
+	lines := make([]string, 0, len(items))
+	for idx, item := range items {
+		if m.copySelectionActive {
+			lines = append(lines, m.renderCopySelectionLine(item.text, idx))
 			continue
 		}
-		if r == '\x1b' {
-			inEscape = true
-			continue
-		}
-		out.WriteRune(r)
+		lines = append(lines, item.text)
 	}
-	return out.String()
+	return lines
+}
+
+func (m *Model) handleCopyModeMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
+	switch {
+	case msg.Button == tea.MouseButtonWheelUp && msg.Action == tea.MouseActionPress:
+		m.viewport.LineUp(3)
+		m.syncViewport(false)
+		return true, nil
+	case msg.Button == tea.MouseButtonWheelDown && msg.Action == tea.MouseActionPress:
+		m.viewport.LineDown(3)
+		m.syncViewport(false)
+		return true, nil
+	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
+		point, ok := m.copyPointFromMouse(msg.X, msg.Y)
+		if !ok {
+			return false, nil
+		}
+		m.copyDragActive = true
+		m.copySelectionActive = true
+		m.copySelectionStart = point
+		m.copySelectionEnd = point
+		m.syncViewport(false)
+		return true, nil
+	case msg.Action == tea.MouseActionMotion && m.copyDragActive:
+		point, ok := m.copyPointFromMouse(msg.X, msg.Y)
+		if !ok {
+			return true, nil
+		}
+		m.copySelectionEnd = point
+		m.copySelectionActive = true
+		m.syncViewport(false)
+		return true, nil
+	case msg.Action == tea.MouseActionRelease && m.copyDragActive:
+		point, ok := m.copyPointFromMouse(msg.X, msg.Y)
+		if ok {
+			m.copySelectionEnd = point
+		}
+		m.copyDragActive = false
+		m.copySelectionActive = !m.copySelectionCollapsed()
+		m.syncViewport(false)
+		if !m.copySelectionActive {
+			return true, nil
+		}
+		text := m.copySelectedText()
+		if text == "" {
+			return true, nil
+		}
+		return true, copyToClipboardCmd(text)
+	}
+	return false, nil
+}
+
+func (m *Model) clearCopySelection() {
+	m.copyDragActive = false
+	m.copySelectionActive = false
+	m.copySelectionStart = copyPoint{}
+	m.copySelectionEnd = copyPoint{}
+}
+
+func (m Model) copySelectionBounds() (copyPoint, copyPoint) {
+	start := m.copySelectionStart
+	end := m.copySelectionEnd
+	if end.index < start.index || (end.index == start.index && end.col < start.col) {
+		start, end = end, start
+	}
+	return start, end
+}
+
+func (m Model) copySelectionCollapsed() bool {
+	start, end := m.copySelectionBounds()
+	return start.index == end.index && start.col == end.col
+}
+
+func (m Model) copyPointFromMouse(x, y int) (copyPoint, bool) {
+	if y < 0 || y >= m.viewport.Height {
+		return copyPoint{}, false
+	}
+	localX := x
+	if m.shouldRenderSidebar() && m.sidebarPosition == 0 {
+		localX -= m.sidebarWidth()
+	}
+	if localX < 0 || localX >= m.chatWidth() {
+		return copyPoint{}, false
+	}
+	items := m.currentViewportItems()
+	index := m.viewport.YOffset + y
+	if index < 0 || index >= len(items) {
+		return copyPoint{}, false
+	}
+	col := visualColumnToRuneIndex(stripANSICodes(items[index].text), localX)
+	return copyPoint{index: index, col: col}, true
+}
+
+func (m Model) copySelectedText() string {
+	if !m.copySelectionActive {
+		return ""
+	}
+	start, end := m.copySelectionBounds()
+	items := m.currentViewportItems()
+	if start.index < 0 || end.index >= len(items) || start.index > end.index {
+		return ""
+	}
+	var parts []string
+	for idx := start.index; idx <= end.index; idx++ {
+		plain := stripANSICodes(items[idx].text)
+		runes := []rune(plain)
+		from := 0
+		to := len(runes)
+		if idx == start.index {
+			from = clamp(start.col, 0, len(runes))
+		}
+		if idx == end.index {
+			to = clamp(end.col, 0, len(runes))
+		}
+		if idx == start.index && idx == end.index && to < from {
+			from, to = to, from
+		}
+		parts = append(parts, strings.TrimRight(string(runes[from:to]), " "))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (m Model) renderCopySelectionLine(line string, index int) string {
+	if !m.copySelectionActive {
+		return line
+	}
+	start, end := m.copySelectionBounds()
+	if index < start.index || index > end.index {
+		return line
+	}
+	plain := stripANSICodes(line)
+	runes := []rune(plain)
+	from := 0
+	to := len(runes)
+	if index == start.index {
+		from = clamp(start.col, 0, len(runes))
+	}
+	if index == end.index {
+		to = clamp(end.col, 0, len(runes))
+	}
+	if index == start.index && index == end.index && to < from {
+		from, to = to, from
+	}
+	if from == to {
+		return plain
+	}
+	style := lipgloss.NewStyle().Background(colorBlue).Foreground(colorInputBg)
+	return string(runes[:from]) + style.Render(string(runes[from:to])) + string(runes[to:])
+}
+
+func copyToClipboardCmd(text string) tea.Cmd {
+	return func() tea.Msg {
+		return copyResultMsg{err: writeClipboard(text), chars: len([]rune(text))}
+	}
+}
+
+func visualColumnToRuneIndex(text string, col int) int {
+	if col <= 0 {
+		return 0
+	}
+	runes := []rune(text)
+	width := 0
+	for i, r := range runes {
+		nextWidth := width + termansi.StringWidth(string(r))
+		if col <= nextWidth {
+			return i + 1
+		}
+		width = nextWidth
+	}
+	return len(runes)
+}
+
+func stripANSICodes(value string) string {
+	return termansi.Strip(value)
 }
 
 func (m Model) renderLiveThoughtBlock() []string {
@@ -3235,6 +3515,456 @@ type toolDisplay struct {
 	Error  string `json:"error"`
 }
 
+type toolPreviewSection struct {
+	Label    string
+	Value    string
+	Code     bool
+	Language string
+}
+
+func (m Model) renderStructuredToolCallPreview(toolName, rawArgs string) []string {
+	if args, ok := parseToolPreviewArgs(rawArgs); ok {
+		return m.renderStructuredToolArgs(toolName, args)
+	}
+	return m.renderToolPlainPreview(rawArgs)
+}
+
+func parseToolPreviewArgs(raw string) (map[string]any, bool) {
+	var args map[string]any
+	if json.Unmarshal([]byte(raw), &args) == nil && len(args) > 0 {
+		return args, true
+	}
+	args = parsePartialJSONObject(raw)
+	return args, len(args) > 0
+}
+
+func (m Model) renderStructuredToolArgs(toolName string, args map[string]any) []string {
+	sections := buildToolPreviewSections(toolName, args, false)
+	if len(sections) == 0 {
+		return nil
+	}
+	var lines []string
+	for _, section := range sections {
+		lines = append(lines, m.renderToolPreviewSection(section)...)
+	}
+	return lines
+}
+
+func (m Model) renderToolPreviewSection(section toolPreviewSection) []string {
+	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.chatWidth()-14))
+	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
+
+	lines := []string{
+		"  " + borderStyle.Render("│") + " " + labelStyle.Render(section.Label+":"),
+	}
+	if section.Code {
+		rendered := m.renderToolCodeBlock(section.Value, section.Language)
+		for _, line := range strings.Split(rendered, "\n") {
+			lines = append(lines, "  "+borderStyle.Render("│")+" "+line)
+		}
+		return lines
+	}
+	for _, line := range strings.Split(bodyStyle.Render(section.Value), "\n") {
+		lines = append(lines, "  "+borderStyle.Render("│")+" "+line)
+	}
+	return lines
+}
+
+func (m Model) renderToolPlainPreview(text string) []string {
+	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.chatWidth()-12))
+	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
+	var lines []string
+	for _, line := range strings.Split(bodyStyle.Render(text), "\n") {
+		lines = append(lines, "  "+borderStyle.Render("│")+" "+line)
+	}
+	return lines
+}
+
+func (m Model) renderToolCodeBlock(value, language string) string {
+	code := strings.TrimRight(value, "\n")
+	if code == "" {
+		return ""
+	}
+	if m.renderer == nil {
+		return code
+	}
+	block := "```"
+	if language != "" {
+		block += language
+	}
+	block += "\n" + code + "\n```"
+	rendered, err := m.renderer.Render(block)
+	if err != nil {
+		return code
+	}
+	return strings.TrimRight(rendered, "\n")
+}
+
+func buildToolPreviewSections(toolName string, args map[string]any, sanitizeSecrets bool) []toolPreviewSection {
+	if len(args) == 0 {
+		return nil
+	}
+	path, _ := args["path"].(string)
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		ri := toolPreviewKeyRank(keys[i])
+		rj := toolPreviewKeyRank(keys[j])
+		if ri != rj {
+			return ri < rj
+		}
+		return keys[i] < keys[j]
+	})
+	sections := make([]toolPreviewSection, 0, len(keys))
+	for _, key := range keys {
+		value := args[key]
+		if sanitizeSecrets {
+			value = sanitizeApprovalValue(key, value)
+		}
+		section, ok := buildToolPreviewSection(toolName, path, key, value)
+		if ok {
+			sections = append(sections, section)
+		}
+	}
+	return sections
+}
+
+func toolPreviewSummary(toolName string, args map[string]any, maxLen int) string {
+	sections := buildToolPreviewSections(toolName, args, false)
+	if len(sections) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, min(3, len(sections)))
+	for _, section := range sections {
+		value := strings.TrimSpace(section.Value)
+		if value == "" {
+			continue
+		}
+		value = strings.ReplaceAll(value, "\n", " ")
+		value = strings.Join(strings.Fields(value), " ")
+		if section.Code {
+			value = shorten(value, 28)
+		} else {
+			value = shorten(value, 20)
+		}
+		parts = append(parts, section.Label+"="+value)
+		if len(parts) == 3 {
+			break
+		}
+	}
+	return outputSummary(strings.Join(parts, " "), maxLen)
+}
+
+func buildToolPreviewSection(toolName, path, key string, value any) (toolPreviewSection, bool) {
+	switch typed := value.(type) {
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return toolPreviewSection{}, false
+		}
+		if toolPreviewTreatAsCode(toolName, key, typed) {
+			return toolPreviewSection{
+				Label:    key,
+				Value:    typed,
+				Code:     true,
+				Language: toolPreviewLanguage(toolName, path, key),
+			}, true
+		}
+		return toolPreviewSection{Label: key, Value: typed}, true
+	default:
+		data, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			return toolPreviewSection{Label: key, Value: fmt.Sprint(value)}, true
+		}
+		return toolPreviewSection{Label: key, Value: string(data)}, true
+	}
+}
+
+func toolPreviewKeyRank(key string) int {
+	switch key {
+	case "path":
+		return 0
+	case "symbol":
+		return 1
+	case "start_line", "end_line", "after_line", "replace_all":
+		return 2
+	case "description":
+		return 3
+	case "content", "new", "old", "patch", "command":
+		return 4
+	default:
+		return 5
+	}
+}
+
+func toolPreviewTreatAsCode(toolName, key, value string) bool {
+	switch key {
+	case "content", "new", "old", "patch", "command":
+		return true
+	}
+	if strings.Contains(value, "\n") {
+		return true
+	}
+	return strings.EqualFold(toolName, "bash") && key == "command"
+}
+
+func toolPreviewLanguage(toolName, path, key string) string {
+	switch key {
+	case "patch":
+		return "diff"
+	case "command":
+		return "bash"
+	}
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".js":
+		return "javascript"
+	case ".ts":
+		return "typescript"
+	case ".tsx":
+		return "tsx"
+	case ".jsx":
+		return "jsx"
+	case ".json":
+		return "json"
+	case ".md":
+		return "markdown"
+	case ".html":
+		return "html"
+	case ".css":
+		return "css"
+	case ".sh":
+		return "bash"
+	case ".yml", ".yaml":
+		return "yaml"
+	case ".toml":
+		return "toml"
+	case ".rs":
+		return "rust"
+	case ".java":
+		return "java"
+	case ".c":
+		return "c"
+	case ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".h":
+		return "cpp"
+	default:
+		return ""
+	}
+}
+
+func parsePartialJSONObject(raw string) map[string]any {
+	index := 0
+	skipJSONWhitespace(raw, &index)
+	if index < len(raw) && raw[index] == '{' {
+		index++
+	}
+	out := map[string]any{}
+	for index < len(raw) {
+		skipJSONWhitespace(raw, &index)
+		if index >= len(raw) || raw[index] == '}' {
+			break
+		}
+		key, ok := readPartialJSONString(raw, &index)
+		if !ok {
+			break
+		}
+		skipJSONWhitespace(raw, &index)
+		if index >= len(raw) || raw[index] != ':' {
+			break
+		}
+		index++
+		skipJSONWhitespace(raw, &index)
+		value, ok := readPartialJSONValue(raw, &index)
+		if !ok {
+			break
+		}
+		out[key] = value
+		skipJSONWhitespace(raw, &index)
+		if index < len(raw) && raw[index] == ',' {
+			index++
+			continue
+		}
+		if index < len(raw) && raw[index] == '}' {
+			break
+		}
+	}
+	return out
+}
+
+func skipJSONWhitespace(raw string, index *int) {
+	for *index < len(raw) {
+		switch raw[*index] {
+		case ' ', '\n', '\r', '\t':
+			*index = *index + 1
+		default:
+			return
+		}
+	}
+}
+
+func readPartialJSONString(raw string, index *int) (string, bool) {
+	if *index >= len(raw) || raw[*index] != '"' {
+		return "", false
+	}
+	*index++
+	var builder strings.Builder
+	escaped := false
+	for *index < len(raw) {
+		ch := raw[*index]
+		*index++
+		if escaped {
+			builder.WriteString(unescapePartialJSONEscape(ch, raw, index))
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			return builder.String(), true
+		}
+		builder.WriteByte(ch)
+	}
+	if escaped {
+		builder.WriteByte('\\')
+	}
+	return builder.String(), true
+}
+
+func unescapePartialJSONEscape(ch byte, raw string, index *int) string {
+	switch ch {
+	case 'n':
+		return "\n"
+	case 'r':
+		return "\r"
+	case 't':
+		return "\t"
+	case '\\':
+		return "\\"
+	case '"':
+		return `"`
+	case '/':
+		return "/"
+	case 'b':
+		return "\b"
+	case 'f':
+		return "\f"
+	case 'u':
+		if *index+4 <= len(raw) {
+			hex := raw[*index : *index+4]
+			if parsed, err := strconv.ParseInt(hex, 16, 32); err == nil {
+				*index += 4
+				return string(rune(parsed))
+			}
+		}
+		return `\u`
+	default:
+		return string(ch)
+	}
+}
+
+func readPartialJSONValue(raw string, index *int) (any, bool) {
+	if *index >= len(raw) {
+		return nil, false
+	}
+	switch raw[*index] {
+	case '"':
+		return readPartialJSONString(raw, index)
+	case '{', '[':
+		return readPartialJSONComposite(raw, index)
+	default:
+		start := *index
+		for *index < len(raw) {
+			switch raw[*index] {
+			case ',', '}', ']':
+				goto done
+			default:
+				*index++
+			}
+		}
+	done:
+		token := strings.TrimSpace(raw[start:*index])
+		if token == "" {
+			return "", false
+		}
+		switch token {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		case "null":
+			return "null", true
+		}
+		if i, err := strconv.ParseInt(token, 10, 64); err == nil {
+			return i, true
+		}
+		if f, err := strconv.ParseFloat(token, 64); err == nil {
+			return f, true
+		}
+		return token, true
+	}
+}
+
+func readPartialJSONComposite(raw string, index *int) (any, bool) {
+	start := *index
+	open := raw[*index]
+	close := byte('}')
+	if open == '[' {
+		close = ']'
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for *index < len(raw) {
+		ch := raw[*index]
+		*index++
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		if ch == open {
+			depth++
+			continue
+		}
+		if ch == close {
+			depth--
+			if depth == 0 {
+				break
+			}
+		}
+	}
+	fragment := strings.TrimSpace(raw[start:*index])
+	if fragment == "" {
+		return "", false
+	}
+	var decoded any
+	if json.Unmarshal([]byte(fragment), &decoded) == nil {
+		return decoded, true
+	}
+	return fragment, true
+}
+
 func (m Model) renderToolStreamLine(raw string) []string {
 	expanded, raw := parseCollapsiblePayload(raw, "toolstream")
 	var msg ToolStreamMsg
@@ -3248,24 +3978,28 @@ func (m Model) renderToolStreamLine(raw string) []string {
 	args := strings.TrimSpace(msg.Arguments)
 	headerStyle := lipgloss.NewStyle().Foreground(colorEmerald).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(colorMuted)
-	bodyStyle := lipgloss.NewStyle().Foreground(colorDim).Width(max(24, m.chatWidth()-12))
-	borderStyle := lipgloss.NewStyle().Foreground(colorMuted)
 	icon := "▸"
 	if expanded {
 		icon = "▾"
 	}
 	summary := "planned"
 	if args != "" {
-		summary += " " + outputSummary(args, 64)
+		if parsed, ok := parseToolPreviewArgs(args); ok {
+			if preview := toolPreviewSummary(name, parsed, 64); preview != "" {
+				summary += " " + preview
+			} else {
+				summary += " " + outputSummary(args, 64)
+			}
+		} else {
+			summary += " " + outputSummary(args, 64)
+		}
 	}
 	lines := []string{"  " + headerStyle.Render(icon+" "+name) + " " + labelStyle.Render(summary)}
 	if !expanded {
 		return lines
 	}
 	if args != "" {
-		for _, line := range strings.Split(bodyStyle.Render(args), "\n") {
-			lines = append(lines, "  "+borderStyle.Render("│")+" "+line)
-		}
+		lines = append(lines, m.renderStructuredToolCallPreview(name, args)...)
 	}
 	return lines
 }
@@ -3303,11 +4037,7 @@ func (m Model) renderToolProgressLine(raw string) []string {
 		return lines
 	}
 	if len(msg.Args) > 0 && (phase == "queued" || phase == "running") {
-		if data, err := json.Marshal(msg.Args); err == nil {
-			for _, line := range strings.Split(bodyStyle.Render(string(data)), "\n") {
-				lines = append(lines, "  "+borderStyle.Render("│")+" "+line)
-			}
-		}
+		lines = append(lines, m.renderStructuredToolArgs(name, msg.Args)...)
 	}
 	output := strings.TrimRight(msg.Output, "\n")
 	if output != "" {
@@ -3500,6 +4230,7 @@ func (m Model) historyPrevious() (tea.Model, tea.Cmd) {
 	}
 	m.input.SetValue(m.history[m.historyIdx])
 	m.input.SetCursor(len(m.input.Value()))
+	m.syncInputSize()
 	return m, nil
 }
 
@@ -3517,6 +4248,7 @@ func (m Model) historyNext() (tea.Model, tea.Cmd) {
 		m.input.SetValue(m.history[m.historyIdx])
 	}
 	m.input.SetCursor(len(m.input.Value()))
+	m.syncInputSize()
 	return m, nil
 }
 
@@ -3530,6 +4262,16 @@ func visibleTail(lines []string, limit int) []string {
 func valueOr(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
+	}
+	return value
+}
+
+func clamp(value, low, high int) int {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
 	}
 	return value
 }
