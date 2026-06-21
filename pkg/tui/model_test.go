@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	appconfig "klyra/pkg/config"
 )
 
 func executeCmd(cmd tea.Cmd) tea.Msg {
@@ -111,7 +113,7 @@ func TestSidebarViewFitsTerminalWidth(t *testing.T) {
 		SidebarDiff:  strings.Repeat("diff line with enough text to wrap if sidebar overflows\n", 8),
 		Provider:     "openai",
 		Model:        "gpt-5.5",
-		BaseURL:      "https://api.freemodel.dev/",
+		BaseURL:      "https://api.compat.example/",
 		Reasoning:    "medium",
 		Sandbox:      "danger-full-access",
 		Approval:     "ask",
@@ -148,6 +150,7 @@ func TestFooterFitsNarrowTerminalWidth(t *testing.T) {
 	model := New(Config{
 		Model:        "gpt-5.5-super-long-model-name",
 		SidebarFiles: []string{"README.md"},
+		MaxContext:   60000,
 	})
 	model.width = 72
 	model.height = 20
@@ -160,6 +163,23 @@ func TestFooterFitsNarrowTerminalWidth(t *testing.T) {
 		if width := lipgloss.Width(visible); width > model.width {
 			t.Fatalf("footer line %d overflows width: got %d want <= %d\n%s", i, width, model.width, visible)
 		}
+	}
+}
+
+func TestFooterShowsCurrentContextAndOmitsHelpHint(t *testing.T) {
+	model := New(Config{
+		MaxContext:   60000,
+		InitialLines: []string{"stats: duration=2.0s input=1250 cached=250 output=500 reasoning=100 total=2000"},
+	})
+	model.width = 140
+	model.height = 20
+	model.syncViewport(true)
+	footer := stripANSI(model.renderFooter())
+	if strings.Contains(footer, "/help") {
+		t.Fatalf("footer should not include /help:\n%s", footer)
+	}
+	if !strings.Contains(footer, "ctx 1,250/60,000") {
+		t.Fatalf("footer should show current context tokens:\n%s", footer)
 	}
 }
 
@@ -260,6 +280,16 @@ var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`)
 
 func stripANSI(value string) string {
 	return ansiPattern.ReplaceAllString(value, "")
+}
+
+func maxRenderedLineWidth(value string) int {
+	maxWidth := 0
+	for _, line := range strings.Split(stripANSI(value), "\n") {
+		if width := lipgloss.Width(strings.TrimRight(line, " ")); width > maxWidth {
+			maxWidth = width
+		}
+	}
+	return maxWidth
 }
 
 func TestCommandOutputLineHasAccent(t *testing.T) {
@@ -375,12 +405,14 @@ func TestSettingsModalAppliesFormWithoutSlashTyping(t *testing.T) {
 	if m.activeModal != modalSettings {
 		t.Fatal("expected settings modal to be open")
 	}
-	// Provider section is collapsed by default: expand, move to field, then change it.
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
-	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyDown})
-	updated, _ = updated.(Model).Update(tea.KeyMsg{Type: tea.KeyRight})
-	// Press Enter to save
-	updated, cmd := updated.(Model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	for idx, f := range m.settingsModal.Fields {
+		if f.Name == "provider" {
+			m.settingsModal.Fields[idx].Value = "openai"
+			break
+		}
+	}
+	// Save directly
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
 		t.Fatal("expected settings apply command")
 	}
@@ -392,6 +424,110 @@ func TestSettingsModalAppliesFormWithoutSlashTyping(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "openai") {
 		t.Fatalf("settings form did not update header:\n%s", view)
+	}
+}
+
+func TestSettingsModalPersistsCustomProviderKey(t *testing.T) {
+	tempDir := t.TempDir()
+	const envVar = "KLYRA_PROVIDER_CUSTOM_OPENAI_API_KEY"
+	original := os.Getenv(envVar)
+	_ = os.Unsetenv(envVar)
+	defer func() {
+		if original == "" {
+			_ = os.Unsetenv(envVar)
+		} else {
+			_ = os.Setenv(envVar, original)
+		}
+	}()
+
+	model := New(Config{
+		CWD: tempDir,
+		Handler: func(input string) (string, error) {
+			return "saved", nil
+		},
+	})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	m := updated.(Model)
+	if m.settingsModal == nil {
+		t.Fatal("expected settings modal")
+	}
+	for idx, f := range m.settingsModal.Fields {
+		switch f.Name {
+		case "provider":
+			m.settingsModal.Fields[idx].Value = "custom-openai"
+		case "endpoint":
+			m.settingsModal.Fields[idx].Value = "https://api.example.test/v1"
+		case "api_mode":
+			m.settingsModal.Fields[idx].Value = "responses"
+		case "provider_key":
+			m.settingsModal.Fields[idx].Value = "test-secret-custom"
+		}
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	_ = executeCmd(cmd)
+	m = updated.(Model)
+
+	if os.Getenv(envVar) != "test-secret-custom" {
+		t.Fatalf("expected %s to be set, got %q", envVar, os.Getenv(envVar))
+	}
+	if custom := m.customProviders["custom-openai"]; custom.BaseURL != "https://api.example.test/v1" || custom.APIType != "responses" {
+		t.Fatalf("expected custom provider to persist, got %+v", custom)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tempDir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), envVar+"=\"test-secret-custom\"") {
+		t.Fatalf("expected custom provider key in .env, got:\n%s", string(data))
+	}
+}
+
+func TestSettingsModalAppliesRuntimeSettingsForContextFilesAndMCP(t *testing.T) {
+	enabled := true
+	var applied RuntimeSettings
+	model := New(Config{
+		ContextFiles: []string{"README.md"},
+		MCPServers: map[string]appconfig.MCPServer{
+			"github": {Command: "github-mcp", Enabled: &enabled},
+		},
+		ApplySettings: func(settings RuntimeSettings) error {
+			applied = settings
+			return nil
+		},
+	})
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	m := updated.(Model)
+	if m.settingsModal == nil {
+		t.Fatal("expected settings modal")
+	}
+	for idx, f := range m.settingsModal.Fields {
+		switch f.Name {
+		case "context_files":
+			m.settingsModal.Fields[idx].Value = "README.md | pkg/tui/model.go | pkg/tui/settings_modal.go"
+		case "mcp_enabled_github":
+			m.settingsModal.Fields[idx].Value = "off"
+		}
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	_ = executeCmd(cmd)
+	m = updated.(Model)
+
+	if got, want := m.cartCount, 3; got != want {
+		t.Fatalf("unexpected cart count: got %d want %d", got, want)
+	}
+	if !reflect.DeepEqual(m.contextFiles, []string{"README.md", "pkg/tui/model.go", "pkg/tui/settings_modal.go"}) {
+		t.Fatalf("unexpected context files in model: %#v", m.contextFiles)
+	}
+	if !reflect.DeepEqual(applied.ContextFiles, m.contextFiles) {
+		t.Fatalf("applySettings did not receive context files: %#v", applied.ContextFiles)
+	}
+	server, ok := applied.MCPServers["github"]
+	if !ok || server.Enabled == nil || *server.Enabled {
+		t.Fatalf("applySettings did not receive disabled MCP server: %#v", applied.MCPServers)
 	}
 }
 
@@ -415,6 +551,62 @@ func TestSettingsModalSectionsCollapsedByDefault(t *testing.T) {
 	view = stripANSI(m.settingsModal.View(100, 40))
 	if !strings.Contains(view, "▾ PROVIDER") || !strings.Contains(view, "Provider:") {
 		t.Fatalf("provider section should expand:\n%s", view)
+	}
+}
+
+func TestRenderModalFrameClampsWrappedContentToViewport(t *testing.T) {
+	content := strings.Repeat("https://very-long-hostname.example.com/some/really/long/path/without/breaks ", 8)
+	content = strings.TrimSpace(content) + "\n" + strings.Repeat("second line ", 12)
+	box := renderModalFrame(72, 12, 80, 80, 48, 90, colorBrand, content)
+	if got, maxHeight := lipgloss.Height(box), 10; got > maxHeight {
+		t.Fatalf("modal frame height overflowed: got %d want <= %d\n%s", got, maxHeight, stripANSI(box))
+	}
+	if got := maxRenderedLineWidth(box); got > 72 {
+		t.Fatalf("modal frame width overflowed: got %d want <= 72\n%s", got, stripANSI(box))
+	}
+}
+
+func TestSettingsModalViewDoesNotOverflowWithLongValues(t *testing.T) {
+	enabled := true
+	sm := NewSettingsModal(
+		"local",
+		"claude-haiku-qwen-35b",
+		"http://10.171.251.1:1234/v1",
+		"chat_completions",
+		"OPENAI_API_KEY",
+		"high",
+		"always",
+		"danger-full-access",
+		"edit",
+		true,
+		true,
+		map[string]string{
+			"openai":    "https://api.deepseek.com",
+			"local":     "http://10.171.251.1:1234/v1",
+			"ollama":    "https://api.deepseek.com",
+			"anthropic": "https://cc.freemodel.dev",
+			"gemini":    "",
+		},
+		128000, 60000, 40, 80, 24000,
+		true, true,
+		1200, 60, 10, true,
+		true, 1000, 10, true, true,
+		true, true, true,
+		"", "", "",
+		[]string{"README.md", "pkg/tui/model.go", "pkg/tui/settings_modal.go", "cmd/klyra/root.go"},
+		map[string]appconfig.MCPServer{
+			"github": {Command: "github-mcp", Enabled: &enabled},
+		},
+	)
+	for section := secProvider; section <= secIntegrations; section++ {
+		sm.setExpanded(section, true)
+	}
+	view := sm.View(100, 18)
+	if got, maxHeight := lipgloss.Height(view), 16; got > maxHeight {
+		t.Fatalf("settings modal overflowed viewport: got %d want <= %d\n%s", got, maxHeight, stripANSI(view))
+	}
+	if got := maxRenderedLineWidth(view); got > 100 {
+		t.Fatalf("settings modal width overflowed: got %d want <= 100\n%s", got, stripANSI(view))
 	}
 }
 
@@ -454,6 +646,25 @@ func TestApprovalPromptRedactsSecrets(t *testing.T) {
 	}
 	if strings.Contains(view, "super-secret-value") {
 		t.Fatalf("approval prompt leaked secret:\n%s", view)
+	}
+}
+
+func TestApprovalPromptRingsBell(t *testing.T) {
+	model := New(Config{})
+	var bell bytes.Buffer
+	prev := bellWriter
+	bellWriter = &bell
+	defer func() { bellWriter = prev }()
+
+	_, cmd := model.Update(ApprovalRequestMsg{
+		Tool:  "bash",
+		Args:  map[string]any{"command": "go test ./..."},
+		Reply: make(chan bool, 1),
+	})
+	executeCmd(cmd)
+
+	if bell.String() != "\a" {
+		t.Fatalf("expected approval bell, got %q", bell.String())
 	}
 }
 
@@ -937,6 +1148,57 @@ func TestToolStreamDeltasAggregateIntoOneCollapsedLine(t *testing.T) {
 	}
 }
 
+func TestToolProgressCollapsesLifecycleIntoOneLine(t *testing.T) {
+	model := New(Config{})
+	updated, _ := model.Update(ToolStreamMsg{
+		Index:     0,
+		ID:        "call-1",
+		Name:      "read_file",
+		Arguments: `{"path":"README.md"}`,
+	})
+	m := updated.(Model)
+
+	updates := []ToolProgressMsg{
+		{Phase: "queued", Tool: "read_file", ID: "call-1"},
+		{Phase: "running", Tool: "read_file", ID: "call-1"},
+		{Phase: "done", Tool: "read_file", ID: "call-1", Output: "1 line"},
+	}
+	for _, progress := range updates {
+		updated, _ = m.Update(progress)
+		m = updated.(Model)
+	}
+
+	count := 0
+	for _, line := range m.lines {
+		if strings.HasPrefix(line, "toolstream:") || strings.HasPrefix(line, "toolprogress:") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected one merged tool lifecycle line, got %d: %#v", count, m.lines)
+	}
+	if !strings.HasPrefix(m.lines[len(m.lines)-1], "toolprogress:0:") {
+		t.Fatalf("expected final merged line to be toolprogress, got %#v", m.lines)
+	}
+
+	view := stripANSI(m.View())
+	if strings.Count(view, "read_file") != 1 {
+		t.Fatalf("tool lifecycle should render once:\n%s", view)
+	}
+	if !strings.Contains(view, "done") {
+		t.Fatalf("merged tool progress should keep final phase:\n%s", view)
+	}
+
+	_, raw := parseCollapsiblePayload(m.lines[len(m.lines)-1], "toolprogress")
+	var merged ToolProgressMsg
+	if err := json.Unmarshal([]byte(raw), &merged); err != nil {
+		t.Fatalf("failed to decode merged payload: %v", err)
+	}
+	if merged.Args["path"] != "README.md" {
+		t.Fatalf("merged tool progress should keep args, got %#v", merged.Args)
+	}
+}
+
 func TestToolStreamFormatsPartialCodeWhileStreaming(t *testing.T) {
 	model := New(Config{})
 	raw, err := json.Marshal(ToolStreamMsg{
@@ -1313,23 +1575,24 @@ func TestCtrlCInterruptsBusyAgentWithoutQuitting(t *testing.T) {
 	if !called {
 		t.Fatal("expected interrupt callback")
 	}
-	if m.busy {
-		t.Fatal("expected busy state to stop after interrupt")
+	if !m.busy {
+		t.Fatal("expected run to remain busy until cancellation is observed")
 	}
-	if !m.interrupted {
-		t.Fatal("expected interrupted state")
+	if !m.interrupting {
+		t.Fatal("expected interrupting state")
 	}
 	if !isClearScreenCmd(cmd) {
 		t.Fatal("expected interrupt to force a clean repaint")
 	}
-	if !modelLinesContain(m.lines, "interrupted", "current", "run") {
+	if !modelLinesContain(m.lines, "interrupting", "current", "run") {
 		t.Fatalf("expected interrupt status line: %#v", m.lines)
 	}
 }
 
 func TestInterruptedResponseKeepsPartialStreamAndSuppressesCancelError(t *testing.T) {
 	model := New(Config{})
-	model.interrupted = true
+	model.interrupting = true
+	model.busy = true
 	model.streamBuf = "partial answer"
 	model.reasoningText = "thinking"
 
@@ -1342,14 +1605,37 @@ func TestInterruptedResponseKeepsPartialStreamAndSuppressesCancelError(t *testin
 	if m.err != nil {
 		t.Fatalf("cancel error should be suppressed after interrupt: %v", m.err)
 	}
-	if m.interrupted {
-		t.Fatal("interrupted state should be cleared after canceled response")
+	if m.interrupted || m.interrupting {
+		t.Fatal("interrupt state should be cleared after canceled response")
+	}
+	if m.busy {
+		t.Fatal("busy state should clear after canceled response")
 	}
 	if !modelLinesContain(m.lines, "agent:", "partial answer") {
 		t.Fatalf("partial stream should persist after interrupt: %#v", m.lines)
 	}
 	if modelLinesContain(m.lines, "error:", "context canceled") {
 		t.Fatalf("context canceled should not be rendered as an error: %#v", m.lines)
+	}
+}
+
+func TestInterruptingRunIgnoresLateStreamDeltas(t *testing.T) {
+	model := New(Config{})
+	model.busy = true
+	model.interrupting = true
+	model.streamBuf = "partial"
+	model.reasoningText = "thinking"
+
+	updated, _ := model.Update(StreamMsg(" should be ignored"))
+	m := updated.(Model)
+	if m.streamBuf != "partial" {
+		t.Fatalf("stream delta should be ignored while interrupting, got %q", m.streamBuf)
+	}
+
+	updated, _ = m.Update(ReasoningMsg(" more"))
+	m = updated.(Model)
+	if m.reasoningText != "thinking" {
+		t.Fatalf("reasoning delta should be ignored while interrupting, got %q", m.reasoningText)
 	}
 }
 
@@ -1628,6 +1914,9 @@ func TestResponseStatsAndTokens(t *testing.T) {
 	if !foundStats {
 		t.Fatal("expected stats line to be appended to m.lines")
 	}
+	if m.currentContextTokens != 1250 || m.currentCachedTokens != 250 {
+		t.Fatalf("expected usage state to update, got input=%d cached=%d", m.currentContextTokens, m.currentCachedTokens)
+	}
 
 	// Verify the parsed values in the stats line
 	if !strings.Contains(statsLine, "input=1250") || !strings.Contains(statsLine, "cached=250") || !strings.Contains(statsLine, "output=500") || !strings.Contains(statsLine, "reasoning=100") {
@@ -1646,5 +1935,24 @@ func TestResponseStatsAndTokens(t *testing.T) {
 
 	if !hasStatsRendered {
 		t.Fatalf("expected formatted stats block, got lines:\n%s", strings.Join(formattedLines, "\n"))
+	}
+}
+
+func TestResponseCompletionRingsBell(t *testing.T) {
+	model := New(Config{})
+	var bell bytes.Buffer
+	prev := bellWriter
+	bellWriter = &bell
+	defer func() { bellWriter = prev }()
+
+	_, cmd := model.Update(responseMsg{
+		input:    "hello",
+		output:   "done",
+		agentRun: true,
+	})
+	executeCmd(cmd)
+
+	if bell.String() != "\a" {
+		t.Fatalf("expected completion bell, got %q", bell.String())
 	}
 }

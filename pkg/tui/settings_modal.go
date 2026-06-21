@@ -3,9 +3,11 @@ package tui
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	appconfig "klyra/pkg/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -20,10 +22,12 @@ const (
 	secSafety
 	secLimits
 	secContext
+	secWorkspace
+	secIntegrations
 	secRouting
 )
 
-var sectionNames = []string{"PROVIDER", "API KEYS", "SAFETY", "LIMITS", "CONTEXT", "ROUTING"}
+var sectionNames = []string{"PROVIDER", "API KEYS", "SAFETY", "LIMITS", "CONTEXT", "WORKSPACE", "INTEGRATIONS", "ROUTING"}
 
 // settingsField represents one editable field in the settings modal.
 type settingsField struct {
@@ -51,7 +55,7 @@ type SettingsModal struct {
 
 // NewSettingsModal creates a settings modal pre-populated with current values.
 func NewSettingsModal(
-	provider, model, endpoint, reasoning, approval, sandbox, mode string,
+	provider, model, endpoint, apiMode, providerKeyEnv, reasoning, approval, sandbox, mode string,
 	storeResponses bool,
 	stream bool,
 	baseURLs map[string]string,
@@ -64,12 +68,19 @@ func NewSettingsModal(
 	contextEmbeddings, contextReranker bool,
 	contextRecipes, negativeContext, skills bool,
 	fastModel, editModel, deepModel string,
+	contextFiles []string,
+	mcpServers map[string]appconfig.MCPServer,
 ) SettingsModal {
+	apiMode = appconfig.NormalizeProviderAPIType(apiMode)
+	if apiMode == "" {
+		apiMode = "chat_completions"
+	}
 	fields := []settingsField{
 		// Provider section
-		{Section: secProvider, Name: "provider", DisplayName: "Provider", Value: provider, Choices: []string{"mock", "openai", "local", "ollama", "anthropic", "gemini"}},
+		{Section: secProvider, Name: "provider", DisplayName: "Provider", Value: provider},
 		{Section: secProvider, Name: "model", DisplayName: "Model", Value: model},
 		{Section: secProvider, Name: "endpoint", DisplayName: "Endpoint", Value: endpoint},
+		{Section: secProvider, Name: "api_mode", DisplayName: "API Mode", Value: apiMode, Choices: []string{"chat_completions", "responses"}},
 		{Section: secProvider, Name: "stream", DisplayName: "Streaming", Value: onOff(stream), Choices: []string{"on", "off"}},
 		{Section: secProvider, Name: "reasoning", DisplayName: "Reasoning", Value: reasoning, Choices: []string{"", "minimal", "low", "medium", "high", "xhigh"}},
 		{Section: secProvider, Name: "endpoint_openai", DisplayName: "OpenAI URL", Value: baseURLs["openai"]},
@@ -79,6 +90,7 @@ func NewSettingsModal(
 		{Section: secProvider, Name: "endpoint_gemini", DisplayName: "Gemini URL", Value: baseURLs["gemini"]},
 
 		// API Keys section
+		{Section: secAPIKeys, Name: "provider_key", DisplayName: "Provider Key", Value: "", EnvVar: providerKeyEnv, Masked: true},
 		{Section: secAPIKeys, Name: "openai_key", DisplayName: "OpenAI Key", Value: "", EnvVar: "OPENAI_API_KEY", Masked: true},
 		{Section: secAPIKeys, Name: "anthropic_key", DisplayName: "Anthropic Key", Value: "", EnvVar: "ANTHROPIC_API_KEY", Masked: true},
 		{Section: secAPIKeys, Name: "gemini_key", DisplayName: "Gemini Key", Value: "", EnvVar: "GEMINI_API_KEY", Masked: true},
@@ -112,11 +124,33 @@ func NewSettingsModal(
 		{Section: secContext, Name: "negative_context", DisplayName: "Negative Context", Value: onOff(negativeContext), Choices: []string{"on", "off"}},
 		{Section: secContext, Name: "skills", DisplayName: "Skills", Value: onOff(skills), Choices: []string{"on", "off"}},
 
-		// Routing section
-		{Section: secRouting, Name: "fast_model", DisplayName: "Fast Model", Value: fastModel},
-		{Section: secRouting, Name: "edit_model", DisplayName: "Edit Model", Value: editModel},
-		{Section: secRouting, Name: "deep_model", DisplayName: "Deep Model", Value: deepModel},
+		// Workspace section
+		{Section: secWorkspace, Name: "context_files", DisplayName: "Context Files", Value: strings.Join(contextFiles, " | ")},
 	}
+
+	if len(mcpServers) > 0 {
+		names := make([]string, 0, len(mcpServers))
+		for name := range mcpServers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			server := mcpServers[name]
+			enabled := server.Enabled == nil || *server.Enabled
+			fields = append(fields, settingsField{
+				Section:     secIntegrations,
+				Name:        "mcp_enabled_" + name,
+				DisplayName: "MCP " + name,
+				Value:       onOff(enabled),
+				Choices:     []string{"on", "off"},
+			})
+		}
+	}
+	fields = append(fields,
+		settingsField{Section: secRouting, Name: "fast_model", DisplayName: "Fast Model", Value: fastModel},
+		settingsField{Section: secRouting, Name: "edit_model", DisplayName: "Edit Model", Value: editModel},
+		settingsField{Section: secRouting, Name: "deep_model", DisplayName: "Deep Model", Value: deepModel},
+	)
 
 	return SettingsModal{
 		Fields:     fields,
@@ -519,10 +553,7 @@ func (s *SettingsModal) View(termWidth, termHeight int) string {
 
 	hintScrollStyle := lipgloss.NewStyle().Foreground(colorDim)
 
-	paddingY := 1
-	if termHeight > 0 && termHeight <= 14 {
-		paddingY = 0
-	}
+	paddingY := modalPaddingY(termHeight)
 
 	visibleMax := s.MaxVisible
 	if termHeight > 0 {
@@ -556,66 +587,7 @@ func (s *SettingsModal) View(termWidth, termHeight int) string {
 		}
 	}
 
-	content := strings.Join(visibleLines, "\n")
-
-	// Width: use 80% of terminal, clamped to [48, 90]
-	boxWidth := s.Width
-	if termWidth > 0 {
-		adaptive := termWidth * 80 / 100
-		if adaptive > 90 {
-			adaptive = 90
-		}
-		if adaptive < 48 {
-			adaptive = max(36, termWidth-4)
-		}
-		if adaptive > boxWidth {
-			boxWidth = adaptive
-		}
-		if boxWidth > termWidth-4 {
-			boxWidth = termWidth - 4
-		}
-	}
-	if boxWidth < 48 {
-		boxWidth = 48
-	}
-
-	// Hard-cap height to prevent any overflow past the terminal.
-	// In Lipgloss, MaxHeight restricts the content area (inner size).
-	// We want outer height to be at most termHeight - 2 to leave 1-line margin top/bottom.
-	// Outer height = content + borders (2) + paddingY * 2.
-	maxInnerHeight := termHeight - 4 - paddingY*2
-	if maxInnerHeight < 2 {
-		maxInnerHeight = 2
-	}
-
-	joined := strings.Join(visibleLines, "\n")
-	flatLines := strings.Split(joined, "\n")
-
-	// Manually truncate visibleLines to strictly guarantee that the rendered box
-	// height does not exceed maxInnerHeight lines under any circumstances.
-	if len(flatLines) > maxInnerHeight {
-		flatLines = flatLines[:maxInnerHeight]
-	}
-
-	content = strings.Join(flatLines, "\n")
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorBrand).
-		Foreground(colorText).
-		Padding(paddingY, 2).
-		Width(boxWidth).
-		MaxHeight(maxInnerHeight).
-		Render(content)
-
-	if termWidth > 0 {
-		box = lipgloss.NewStyle().
-			Width(termWidth).
-			Align(lipgloss.Center).
-			Render(box)
-	}
-
-	return box
+	return renderModalFrame(termWidth, termHeight, s.Width, 80, 48, 90, colorBrand, strings.Join(visibleLines, "\n"))
 }
 
 // maskKey shows first 3 and last 3 chars of a key, rest as dots.

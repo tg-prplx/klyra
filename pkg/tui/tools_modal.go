@@ -264,10 +264,7 @@ func (t *ToolsModal) View(termWidth, termHeight int) string {
 
 	hintScrollStyle := lipgloss.NewStyle().Foreground(colorDim)
 
-	paddingY := 1
-	if termHeight > 0 && termHeight <= 14 {
-		paddingY = 0
-	}
+	paddingY := modalPaddingY(termHeight)
 
 	visibleMax := t.MaxVisible
 	if termHeight > 0 {
@@ -301,59 +298,5 @@ func (t *ToolsModal) View(termWidth, termHeight int) string {
 		}
 	}
 
-	content := strings.Join(visibleLines, "\n")
-
-	// Width: use 80% of terminal, clamped to [48, 90]
-	boxWidth := t.Width
-	if termWidth > 0 {
-		adaptive := termWidth * 80 / 100
-		if adaptive > 90 {
-			adaptive = 90
-		}
-		if adaptive < 48 {
-			adaptive = max(36, termWidth-4)
-		}
-		if adaptive > boxWidth {
-			boxWidth = adaptive
-		}
-		if boxWidth > termWidth-4 {
-			boxWidth = termWidth - 4
-		}
-	}
-	if boxWidth < 48 {
-		boxWidth = 48
-	}
-
-	// Hard-cap height to prevent any overflow past the terminal.
-	maxInnerHeight := termHeight - 4 - paddingY*2
-	if maxInnerHeight < 2 {
-		maxInnerHeight = 2
-	}
-
-	joined := strings.Join(visibleLines, "\n")
-	flatLines := strings.Split(joined, "\n")
-
-	if len(flatLines) > maxInnerHeight {
-		flatLines = flatLines[:maxInnerHeight]
-	}
-
-	content = strings.Join(flatLines, "\n")
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorBrand).
-		Foreground(colorText).
-		Padding(paddingY, 2).
-		Width(boxWidth).
-		MaxHeight(maxInnerHeight).
-		Render(content)
-
-	if termWidth > 0 {
-		box = lipgloss.NewStyle().
-			Width(termWidth).
-			Align(lipgloss.Center).
-			Render(box)
-	}
-
-	return box
+	return renderModalFrame(termWidth, termHeight, t.Width, 80, 48, 90, colorBrand, strings.Join(visibleLines, "\n"))
 }

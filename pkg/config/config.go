@@ -5,43 +5,47 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
+var customProviderEnvSanitizer = regexp.MustCompile(`[^A-Z0-9]+`)
+
 type Config struct {
-	Provider               string               `json:"provider"`
-	Model                  string               `json:"model"`
-	ModelRoutes            map[string]string    `json:"model_routes,omitempty"`
-	BaseURLs               map[string]string    `json:"base_urls,omitempty"`
-	Reasoning              string               `json:"reasoning,omitempty"`
-	Stream                 bool                 `json:"stream"`
-	MaxSteps               int                  `json:"max_steps"`
-	MaxMessages            int                  `json:"max_messages"`
-	MaxContext             int                  `json:"max_context_tokens"`
-	MaxInstructions        int                  `json:"max_instruction_bytes"`
-	MaxOutput              int                  `json:"max_output_tokens"`
-	ApprovalMode           string               `json:"approval_mode"`
-	Sandbox                string               `json:"sandbox"`
-	Mode                   string               `json:"mode"`
-	ContextFiles           []string             `json:"context_files,omitempty"`
-	ContextCockpit         bool                 `json:"context_cockpit"`
-	ContextCockpitInject   bool                 `json:"context_cockpit_inject"`
-	ContextCockpitTokens   int                  `json:"context_cockpit_tokens"`
-	ContextCockpitMaxFiles int                  `json:"context_cockpit_max_files"`
-	ContextCockpitMaxCards int                  `json:"context_cockpit_max_cards"`
-	ContextCockpitDiff     bool                 `json:"context_cockpit_diff"`
-	ContextRetrieval       bool                 `json:"context_retrieval"`
-	ContextRetrievalTokens int                  `json:"context_retrieval_tokens"`
-	ContextRetrievalChunks int                  `json:"context_retrieval_chunks"`
-	ContextEmbeddings      bool                 `json:"context_embeddings"`
-	ContextReranker        bool                 `json:"context_reranker"`
-	ContextRecipes         bool                 `json:"context_recipes"`
-	NegativeContext        bool                 `json:"negative_context"`
-	Skills                 bool                 `json:"skills"`
-	MCPServers             map[string]MCPServer `json:"mcp_servers,omitempty"`
-	StoreResponses         bool                 `json:"store_responses"`
-	DisabledTools          []string             `json:"disabled_tools,omitempty"`
-	Profiles               map[string]Profile   `json:"profiles,omitempty"`
+	Provider               string                    `json:"provider"`
+	Model                  string                    `json:"model"`
+	ModelRoutes            map[string]string         `json:"model_routes,omitempty"`
+	BaseURLs               map[string]string         `json:"base_urls,omitempty"`
+	CustomProviders        map[string]CustomProvider `json:"custom_providers,omitempty"`
+	Reasoning              string                    `json:"reasoning,omitempty"`
+	Stream                 bool                      `json:"stream"`
+	MaxSteps               int                       `json:"max_steps"`
+	MaxMessages            int                       `json:"max_messages"`
+	MaxContext             int                       `json:"max_context_tokens"`
+	MaxInstructions        int                       `json:"max_instruction_bytes"`
+	MaxOutput              int                       `json:"max_output_tokens"`
+	ApprovalMode           string                    `json:"approval_mode"`
+	Sandbox                string                    `json:"sandbox"`
+	Mode                   string                    `json:"mode"`
+	ContextFiles           []string                  `json:"context_files,omitempty"`
+	ContextCockpit         bool                      `json:"context_cockpit"`
+	ContextCockpitInject   bool                      `json:"context_cockpit_inject"`
+	ContextCockpitTokens   int                       `json:"context_cockpit_tokens"`
+	ContextCockpitMaxFiles int                       `json:"context_cockpit_max_files"`
+	ContextCockpitMaxCards int                       `json:"context_cockpit_max_cards"`
+	ContextCockpitDiff     bool                      `json:"context_cockpit_diff"`
+	ContextRetrieval       bool                      `json:"context_retrieval"`
+	ContextRetrievalTokens int                       `json:"context_retrieval_tokens"`
+	ContextRetrievalChunks int                       `json:"context_retrieval_chunks"`
+	ContextEmbeddings      bool                      `json:"context_embeddings"`
+	ContextReranker        bool                      `json:"context_reranker"`
+	ContextRecipes         bool                      `json:"context_recipes"`
+	NegativeContext        bool                      `json:"negative_context"`
+	Skills                 bool                      `json:"skills"`
+	MCPServers             map[string]MCPServer      `json:"mcp_servers,omitempty"`
+	StoreResponses         bool                      `json:"store_responses"`
+	DisabledTools          []string                  `json:"disabled_tools,omitempty"`
+	Profiles               map[string]Profile        `json:"profiles,omitempty"`
 }
 
 type MCPServer struct {
@@ -51,39 +55,46 @@ type MCPServer struct {
 	Enabled *bool             `json:"enabled,omitempty"`
 }
 
+type CustomProvider struct {
+	BaseURL   string `json:"base_url,omitempty"`
+	APIType   string `json:"api_type,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+}
+
 type Profile struct {
-	Provider               string               `json:"provider,omitempty"`
-	Model                  string               `json:"model,omitempty"`
-	ModelRoutes            map[string]string    `json:"model_routes,omitempty"`
-	BaseURLs               map[string]string    `json:"base_urls,omitempty"`
-	Reasoning              string               `json:"reasoning,omitempty"`
-	Stream                 *bool                `json:"stream,omitempty"`
-	MaxSteps               int                  `json:"max_steps,omitempty"`
-	MaxMessages            int                  `json:"max_messages,omitempty"`
-	MaxContext             int                  `json:"max_context_tokens,omitempty"`
-	MaxInstructions        int                  `json:"max_instruction_bytes,omitempty"`
-	MaxOutput              int                  `json:"max_output_tokens,omitempty"`
-	ApprovalMode           string               `json:"approval_mode,omitempty"`
-	Sandbox                string               `json:"sandbox,omitempty"`
-	Mode                   string               `json:"mode,omitempty"`
-	ContextFiles           []string             `json:"context_files,omitempty"`
-	ContextCockpit         *bool                `json:"context_cockpit,omitempty"`
-	ContextCockpitInject   *bool                `json:"context_cockpit_inject,omitempty"`
-	ContextCockpitTokens   int                  `json:"context_cockpit_tokens,omitempty"`
-	ContextCockpitMaxFiles int                  `json:"context_cockpit_max_files,omitempty"`
-	ContextCockpitMaxCards int                  `json:"context_cockpit_max_cards,omitempty"`
-	ContextCockpitDiff     *bool                `json:"context_cockpit_diff,omitempty"`
-	ContextRetrieval       *bool                `json:"context_retrieval,omitempty"`
-	ContextRetrievalTokens int                  `json:"context_retrieval_tokens,omitempty"`
-	ContextRetrievalChunks int                  `json:"context_retrieval_chunks,omitempty"`
-	ContextEmbeddings      *bool                `json:"context_embeddings,omitempty"`
-	ContextReranker        *bool                `json:"context_reranker,omitempty"`
-	ContextRecipes         *bool                `json:"context_recipes,omitempty"`
-	NegativeContext        *bool                `json:"negative_context,omitempty"`
-	Skills                 *bool                `json:"skills,omitempty"`
-	MCPServers             map[string]MCPServer `json:"mcp_servers,omitempty"`
-	StoreResponses         *bool                `json:"store_responses,omitempty"`
-	DisabledTools          []string             `json:"disabled_tools,omitempty"`
+	Provider               string                    `json:"provider,omitempty"`
+	Model                  string                    `json:"model,omitempty"`
+	ModelRoutes            map[string]string         `json:"model_routes,omitempty"`
+	BaseURLs               map[string]string         `json:"base_urls,omitempty"`
+	CustomProviders        map[string]CustomProvider `json:"custom_providers,omitempty"`
+	Reasoning              string                    `json:"reasoning,omitempty"`
+	Stream                 *bool                     `json:"stream,omitempty"`
+	MaxSteps               int                       `json:"max_steps,omitempty"`
+	MaxMessages            int                       `json:"max_messages,omitempty"`
+	MaxContext             int                       `json:"max_context_tokens,omitempty"`
+	MaxInstructions        int                       `json:"max_instruction_bytes,omitempty"`
+	MaxOutput              int                       `json:"max_output_tokens,omitempty"`
+	ApprovalMode           string                    `json:"approval_mode,omitempty"`
+	Sandbox                string                    `json:"sandbox,omitempty"`
+	Mode                   string                    `json:"mode,omitempty"`
+	ContextFiles           []string                  `json:"context_files,omitempty"`
+	ContextCockpit         *bool                     `json:"context_cockpit,omitempty"`
+	ContextCockpitInject   *bool                     `json:"context_cockpit_inject,omitempty"`
+	ContextCockpitTokens   int                       `json:"context_cockpit_tokens,omitempty"`
+	ContextCockpitMaxFiles int                       `json:"context_cockpit_max_files,omitempty"`
+	ContextCockpitMaxCards int                       `json:"context_cockpit_max_cards,omitempty"`
+	ContextCockpitDiff     *bool                     `json:"context_cockpit_diff,omitempty"`
+	ContextRetrieval       *bool                     `json:"context_retrieval,omitempty"`
+	ContextRetrievalTokens int                       `json:"context_retrieval_tokens,omitempty"`
+	ContextRetrievalChunks int                       `json:"context_retrieval_chunks,omitempty"`
+	ContextEmbeddings      *bool                     `json:"context_embeddings,omitempty"`
+	ContextReranker        *bool                     `json:"context_reranker,omitempty"`
+	ContextRecipes         *bool                     `json:"context_recipes,omitempty"`
+	NegativeContext        *bool                     `json:"negative_context,omitempty"`
+	Skills                 *bool                     `json:"skills,omitempty"`
+	MCPServers             map[string]MCPServer      `json:"mcp_servers,omitempty"`
+	StoreResponses         *bool                     `json:"store_responses,omitempty"`
+	DisabledTools          []string                  `json:"disabled_tools,omitempty"`
 }
 
 func Default() Config {
@@ -91,6 +102,7 @@ func Default() Config {
 		Provider:               "mock",
 		Model:                  "mock-agent",
 		BaseURLs:               map[string]string{},
+		CustomProviders:        map[string]CustomProvider{},
 		MCPServers:             map[string]MCPServer{},
 		Stream:                 true,
 		MaxSteps:               20,
@@ -163,6 +175,57 @@ func Default() Config {
 			},
 		},
 	}
+}
+
+func CanonicalProviderName(name string) string {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	switch normalized {
+	case "", "openai", "responses":
+		return "openai"
+	case "local", "chat", "chat-completions", "openai-chat", "openai-compatible":
+		return "local"
+	case "ollama":
+		return "ollama"
+	case "anthropic", "claude":
+		return "anthropic"
+	case "gemini", "google":
+		return "gemini"
+	default:
+		return normalized
+	}
+}
+
+func IsBuiltInProvider(name string) bool {
+	switch CanonicalProviderName(name) {
+	case "openai", "local", "ollama", "anthropic", "gemini", "mock":
+		return true
+	default:
+		return false
+	}
+}
+
+func NormalizeProviderAPIType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "chat", "chat_completions", "chat-completions", "completions":
+		return "chat_completions"
+	case "responses", "response":
+		return "responses"
+	default:
+		return "chat_completions"
+	}
+}
+
+func CustomProviderAPIKeyEnv(name string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(CanonicalProviderName(name)))
+	if normalized == "" {
+		normalized = "CUSTOM"
+	}
+	normalized = customProviderEnvSanitizer.ReplaceAllString(normalized, "_")
+	normalized = strings.Trim(normalized, "_")
+	if normalized == "" {
+		normalized = "CUSTOM"
+	}
+	return "KLYRA_PROVIDER_" + normalized + "_API_KEY"
 }
 
 func DefaultPath() string {
@@ -284,6 +347,14 @@ func (c Config) WithProfile(name string) (Config, error) {
 			c.BaseURLs[provider] = baseURL
 		}
 	}
+	if profile.CustomProviders != nil {
+		if c.CustomProviders == nil {
+			c.CustomProviders = map[string]CustomProvider{}
+		}
+		for name, provider := range profile.CustomProviders {
+			c.CustomProviders[CanonicalProviderName(name)] = provider
+		}
+	}
 	if profile.Reasoning != "" {
 		c.Reasoning = profile.Reasoning
 	}
@@ -383,6 +454,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.BaseURLs == nil {
 		c.BaseURLs = map[string]string{}
+	}
+	if c.CustomProviders == nil {
+		c.CustomProviders = map[string]CustomProvider{}
+	}
+	if len(c.CustomProviders) > 0 {
+		normalized := make(map[string]CustomProvider, len(c.CustomProviders))
+		for name, provider := range c.CustomProviders {
+			key := CanonicalProviderName(name)
+			provider.APIType = NormalizeProviderAPIType(provider.APIType)
+			if strings.TrimSpace(provider.APIKeyEnv) == "" {
+				provider.APIKeyEnv = CustomProviderAPIKeyEnv(key)
+			}
+			normalized[key] = provider
+		}
+		c.CustomProviders = normalized
 	}
 	if c.MCPServers == nil {
 		c.MCPServers = map[string]MCPServer{}

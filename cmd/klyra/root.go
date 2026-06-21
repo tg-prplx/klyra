@@ -103,7 +103,7 @@ func newRootCommand() *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.cwd, "cwd", ".", "workspace directory")
 	root.PersistentFlags().StringVar(&opts.configPath, "config", "", "config file path")
 	root.PersistentFlags().StringVar(&opts.profile, "profile", "", "config profile")
-	root.PersistentFlags().StringVar(&opts.provider, "provider", "", "LLM provider: mock, openai, chat, ollama, anthropic, gemini")
+	root.PersistentFlags().StringVar(&opts.provider, "provider", "", "LLM provider: mock, openai, local, ollama, anthropic, gemini, or custom alias from config")
 	root.PersistentFlags().StringVar(&opts.model, "model", "", "model name; can also use provider-specific *_MODEL env vars")
 	root.PersistentFlags().StringVar(&opts.baseURL, "base-url", "", "provider endpoint base URL override")
 	root.PersistentFlags().StringVar(&opts.fastModel, "fast-model", "", "model for inspection/search tasks")
@@ -397,7 +397,7 @@ func newTUICommand(opts *options) *cobra.Command {
 				{Name: "/compact", Description: "Compact chat history to reduce tokens"},
 				{Name: "/settings", Description: "Open settings form"},
 				{Name: "/features", Description: "Toggle features on/off"},
-				{Name: "/provider", Description: "Set provider: mock/openai/chat/ollama/anthropic/gemini"},
+				{Name: "/provider", Description: "Set provider: built-in or custom alias"},
 				{Name: "/model", Description: "Set the active model name"},
 				{Name: "/endpoint", Description: "Set provider endpoint base URL"},
 				{Name: "/reasoning", Description: "Set reasoning effort: minimal/low/medium/high/xhigh"},
@@ -497,7 +497,7 @@ func newTUICommand(opts *options) *cobra.Command {
 						return formatSettingSaved("settings", fmt.Sprintf("%d value(s)", len(args)-1)), nil
 					case "/provider":
 						if len(args) < 2 {
-							return "usage: /provider mock|openai|chat|ollama|anthropic|gemini", nil
+							return "usage: /provider mock|openai|local|ollama|anthropic|gemini|<custom-alias>", nil
 						}
 						runtimeCfg.Provider = args[1]
 						runtimeCfg.Model = ""
@@ -762,6 +762,7 @@ func newTUICommand(opts *options) *cobra.Command {
 				Model:                  runtimeCfg.Model,
 				BaseURL:                providerBaseURL(runtimeCfg, runtimeCfg.Provider),
 				BaseURLs:               runtimeCfg.BaseURLs,
+				CustomProviders:        runtimeCfg.CustomProviders,
 				Reasoning:              runtimeCfg.Reasoning,
 				Stream:                 runtimeCfg.Stream,
 				Sandbox:                runtimeCfg.Sandbox,
@@ -793,7 +794,50 @@ func newTUICommand(opts *options) *cobra.Command {
 				DeepModel:              runtimeCfg.ModelRoutes["deep"],
 				AllTools:               allToolsList,
 				DisabledTools:          runtimeCfg.DisabledTools,
+				ContextFiles:           runtimeCfg.ContextFiles,
+				MCPServers:             runtimeCfg.MCPServers,
 				Handler:                handler,
+				ApplySettings: func(settings tui.RuntimeSettings) error {
+					runtimeCfg.Provider = settings.Provider
+					runtimeCfg.Model = settings.Model
+					runtimeCfg.BaseURLs = settings.BaseURLs
+					runtimeCfg.CustomProviders = settings.CustomProviders
+					runtimeCfg.Reasoning = settings.Reasoning
+					runtimeCfg.Stream = settings.Stream
+					runtimeCfg.Sandbox = settings.Sandbox
+					runtimeCfg.ApprovalMode = settings.Approval
+					runtimeCfg.Mode = settings.Mode
+					runtimeCfg.StoreResponses = settings.StoreResponses
+					runtimeCfg.MaxContext = settings.MaxContext
+					runtimeCfg.MaxOutput = settings.MaxOutput
+					runtimeCfg.MaxSteps = settings.MaxSteps
+					runtimeCfg.MaxMessages = settings.MaxMessages
+					runtimeCfg.MaxInstructions = settings.MaxInstructions
+					runtimeCfg.ContextCockpit = settings.ContextCockpit
+					runtimeCfg.ContextCockpitInject = settings.ContextCockpitInject
+					runtimeCfg.ContextCockpitTokens = settings.ContextCockpitTokens
+					runtimeCfg.ContextCockpitMaxFiles = settings.ContextCockpitMaxFiles
+					runtimeCfg.ContextCockpitMaxCards = settings.ContextCockpitMaxCards
+					runtimeCfg.ContextCockpitDiff = settings.ContextCockpitDiff
+					runtimeCfg.ContextRetrieval = settings.ContextRetrieval
+					runtimeCfg.ContextRetrievalTokens = settings.ContextRetrievalTokens
+					runtimeCfg.ContextRetrievalChunks = settings.ContextRetrievalChunks
+					runtimeCfg.ContextEmbeddings = settings.ContextEmbeddings
+					runtimeCfg.ContextReranker = settings.ContextReranker
+					runtimeCfg.ContextRecipes = settings.ContextRecipes
+					runtimeCfg.NegativeContext = settings.NegativeContext
+					runtimeCfg.Skills = settings.Skills
+					runtimeCfg.ContextFiles = settings.ContextFiles
+					runtimeCfg.DisabledTools = settings.DisabledTools
+					runtimeCfg.MCPServers = settings.MCPServers
+					if runtimeCfg.ModelRoutes == nil {
+						runtimeCfg.ModelRoutes = map[string]string{}
+					}
+					setModelRoute(&runtimeCfg, "fast", settings.FastModel)
+					setModelRoute(&runtimeCfg, "edit", settings.EditModel)
+					setModelRoute(&runtimeCfg, "deep", settings.DeepModel)
+					return runtimeCfg.Save(opts.configPath)
+				},
 				Interrupt: func() bool {
 					activeMu.Lock()
 					runState := active
@@ -966,9 +1010,26 @@ func formatTUISettings(cfg appconfig.Config, attachments []llm.Attachment) strin
 	fmt.Fprintf(&builder, "- provider: `%s`\n", valueOrString(cfg.Provider, "mock"))
 	fmt.Fprintf(&builder, "- model: `%s`\n", valueOrString(cfg.Model, "provider env / routed"))
 	fmt.Fprintf(&builder, "- endpoint: `%s`\n", valueOrString(providerBaseURL(cfg, cfg.Provider), "provider default/env"))
+	if apiType := providerAPIType(cfg, cfg.Provider); apiType != "" {
+		fmt.Fprintf(&builder, "- api mode: `%s`\n", apiType)
+	}
+	if keyEnv := providerAPIKeyEnv(cfg, cfg.Provider); keyEnv != "" {
+		fmt.Fprintf(&builder, "- api key env: `%s`\n", keyEnv)
+	}
 	for _, provider := range []string{"openai", "local", "ollama", "anthropic", "gemini"} {
 		if endpoint := providerBaseURL(cfg, provider); endpoint != "" {
 			fmt.Fprintf(&builder, "- %s endpoint: `%s`\n", provider, endpoint)
+		}
+	}
+	if len(cfg.CustomProviders) > 0 {
+		names := make([]string, 0, len(cfg.CustomProviders))
+		for name := range cfg.CustomProviders {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			custom := cfg.CustomProviders[name]
+			fmt.Fprintf(&builder, "- custom %s: `%s` via `%s` (%s)\n", name, valueOrString(custom.BaseURL, "unset"), valueOrString(appconfig.NormalizeProviderAPIType(custom.APIType), "chat_completions"), valueOrString(custom.APIKeyEnv, appconfig.CustomProviderAPIKeyEnv(name)))
 		}
 	}
 	fmt.Fprintf(&builder, "- reasoning: `%s`\n", valueOrString(cfg.Reasoning, "default"))
@@ -999,7 +1060,7 @@ func formatTUISettings(cfg appconfig.Config, attachments []llm.Attachment) strin
 	fmt.Fprintf(&builder, "- edit model: `%s`\n", valueOrString(cfg.ModelRoutes["edit"], "default"))
 	fmt.Fprintf(&builder, "- deep model: `%s`\n", valueOrString(cfg.ModelRoutes["deep"], "default"))
 	fmt.Fprintf(&builder, "- pending images: `%d`\n", len(attachments))
-	builder.WriteString("\nUse `/provider`, `/model`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/mode`, `/cart add`, `/context`, and `/attach` to change this without leaving Klyra.")
+	builder.WriteString("\nUse `/provider`, `/model`, `/endpoint`, `/set api_mode=...`, `/reasoning`, `/limits`, `/approval`, `/sandbox`, `/mode`, `/cart add`, `/context`, and `/attach` to change this without leaving Klyra.")
 	return builder.String()
 }
 
@@ -1024,6 +1085,8 @@ func applyTUISet(cfg *appconfig.Config, args []string) error {
 			cfg.Model = value
 		case "endpoint", "base_url", "base-url":
 			setProviderBaseURL(cfg, cfg.Provider, value)
+		case "api_mode", "api-mode":
+			setProviderAPIType(cfg, cfg.Provider, value)
 		case "endpoint_openai", "openai_endpoint":
 			setProviderBaseURL(cfg, "openai", value)
 		case "endpoint_local", "local_endpoint":
@@ -2140,22 +2203,27 @@ func printEnvStatus(out interface{ Write([]byte) (int, error) }, name string) {
 }
 
 func buildProvider(name, model string) (llm.Provider, string, error) {
-	return buildProviderWithBaseURL(name, model, "")
+	return buildProviderWithConfig(appconfig.Default(), name, model, "")
 }
 
 func buildProviderFromConfig(cfg appconfig.Config) (llm.Provider, string, error) {
-	return buildProviderWithBaseURL(cfg.Provider, cfg.Model, providerBaseURL(cfg, cfg.Provider))
+	return buildProviderWithConfig(cfg, cfg.Provider, cfg.Model, providerBaseURL(cfg, cfg.Provider))
 }
 
-func buildProviderWithBaseURL(name, model, baseURL string) (llm.Provider, string, error) {
+func buildProviderWithConfig(cfg appconfig.Config, name, model, baseURL string) (llm.Provider, string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		normalized = "mock"
+	} else {
+		normalized = appconfig.CanonicalProviderName(normalized)
+	}
 	switch normalized {
-	case "", "mock":
+	case "mock":
 		if strings.TrimSpace(model) == "" {
 			model = "mock-agent"
 		}
 		return llm.NewMockProvider(), model, nil
-	case "openai", "responses":
+	case "openai":
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = os.Getenv("OPENAI_BASE_URL")
 		}
@@ -2167,14 +2235,14 @@ func buildProviderWithBaseURL(name, model, baseURL string) (llm.Provider, string
 			model = os.Getenv("OPENAI_MODEL")
 		}
 		return provider, model, nil
-	case "local", "chat", "chat-completions", "openai-chat", "openai-compatible":
+	case "local":
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = os.Getenv("LOCAL_BASE_URL")
 		}
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = os.Getenv("OPENAI_BASE_URL")
 		}
-		if strings.TrimSpace(baseURL) == "" && normalized == "local" {
+		if strings.TrimSpace(baseURL) == "" {
 			// Sensible default for local testing if not using Ollama
 			baseURL = "http://localhost:8080/v1"
 		}
@@ -2235,15 +2303,110 @@ func buildProviderWithBaseURL(name, model, baseURL string) (llm.Provider, string
 		}
 		return provider, model, nil
 	default:
-		return nil, "", fmt.Errorf("provider %q is not implemented yet", name)
+		custom, ok := cfg.CustomProviders[normalized]
+		if !ok {
+			return nil, "", fmt.Errorf("provider %q is not implemented yet", name)
+		}
+		if strings.TrimSpace(baseURL) == "" {
+			baseURL = strings.TrimSpace(custom.BaseURL)
+		}
+		apiType := appconfig.NormalizeProviderAPIType(custom.APIType)
+		apiKeyEnv := strings.TrimSpace(custom.APIKeyEnv)
+		if apiKeyEnv == "" {
+			apiKeyEnv = appconfig.CustomProviderAPIKeyEnv(normalized)
+		}
+		apiKey := os.Getenv(apiKeyEnv)
+		if strings.TrimSpace(model) == "" || model == "mock-agent" {
+			model = os.Getenv(strings.ToUpper(strings.ReplaceAll(apiKeyEnv, "_API_KEY", "_MODEL")))
+			if model == "" {
+				model = os.Getenv("OPENAI_MODEL")
+			}
+			if model == "" {
+				model = "custom-model"
+			}
+		}
+		switch apiType {
+		case "responses":
+			provider, err := llm.NewResponsesProvider(apiKey, baseURL)
+			if err != nil {
+				return nil, "", err
+			}
+			return provider, model, nil
+		default:
+			provider, err := llm.NewOpenAIProvider(apiKey, baseURL)
+			if err != nil {
+				return nil, "", err
+			}
+			return provider, model, nil
+		}
 	}
 }
 
 func providerBaseURL(cfg appconfig.Config, provider string) string {
-	if cfg.BaseURLs == nil {
+	normalized := appconfig.CanonicalProviderName(provider)
+	if appconfig.IsBuiltInProvider(normalized) {
+		if cfg.BaseURLs == nil {
+			return ""
+		}
+		return cfg.BaseURLs[normalized]
+	}
+	if cfg.CustomProviders == nil {
 		return ""
 	}
-	return cfg.BaseURLs[strings.ToLower(strings.TrimSpace(provider))]
+	return cfg.CustomProviders[normalized].BaseURL
+}
+
+func providerAPIType(cfg appconfig.Config, provider string) string {
+	normalized := appconfig.CanonicalProviderName(provider)
+	switch normalized {
+	case "openai":
+		return "responses"
+	case "local", "ollama":
+		return "chat_completions"
+	case "anthropic", "gemini", "mock":
+		return ""
+	default:
+		if cfg.CustomProviders == nil {
+			return "chat_completions"
+		}
+		return appconfig.NormalizeProviderAPIType(cfg.CustomProviders[normalized].APIType)
+	}
+}
+
+func providerAPIKeyEnv(cfg appconfig.Config, provider string) string {
+	normalized := appconfig.CanonicalProviderName(provider)
+	switch normalized {
+	case "openai", "local":
+		return "OPENAI_API_KEY"
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "gemini":
+		return "GEMINI_API_KEY"
+	case "ollama", "mock":
+		return ""
+	default:
+		custom := cfg.CustomProviders[normalized]
+		if strings.TrimSpace(custom.APIKeyEnv) != "" {
+			return custom.APIKeyEnv
+		}
+		return appconfig.CustomProviderAPIKeyEnv(normalized)
+	}
+}
+
+func setProviderAPIType(cfg *appconfig.Config, provider, apiType string) {
+	provider = appconfig.CanonicalProviderName(provider)
+	if provider == "" || appconfig.IsBuiltInProvider(provider) {
+		return
+	}
+	if cfg.CustomProviders == nil {
+		cfg.CustomProviders = map[string]appconfig.CustomProvider{}
+	}
+	custom := cfg.CustomProviders[provider]
+	custom.APIType = appconfig.NormalizeProviderAPIType(apiType)
+	if strings.TrimSpace(custom.APIKeyEnv) == "" {
+		custom.APIKeyEnv = appconfig.CustomProviderAPIKeyEnv(provider)
+	}
+	cfg.CustomProviders[provider] = custom
 }
 
 func buildToolRegistry(ctx context.Context, cfg appconfig.Config) (*tools.Registry, error) {
@@ -2285,19 +2448,34 @@ func configuredMCPServers(cfg appconfig.Config) []tools.MCPServerConfig {
 }
 
 func setProviderBaseURL(cfg *appconfig.Config, provider, baseURL string) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
+	provider = appconfig.CanonicalProviderName(provider)
 	if provider == "" {
 		provider = "openai"
 	}
-	if cfg.BaseURLs == nil {
-		cfg.BaseURLs = map[string]string{}
-	}
 	baseURL = strings.TrimSpace(baseURL)
-	if baseURL == "" {
-		delete(cfg.BaseURLs, provider)
+	if appconfig.IsBuiltInProvider(provider) {
+		if cfg.BaseURLs == nil {
+			cfg.BaseURLs = map[string]string{}
+		}
+		if baseURL == "" {
+			delete(cfg.BaseURLs, provider)
+			return
+		}
+		cfg.BaseURLs[provider] = baseURL
 		return
 	}
-	cfg.BaseURLs[provider] = baseURL
+	if cfg.CustomProviders == nil {
+		cfg.CustomProviders = map[string]appconfig.CustomProvider{}
+	}
+	custom := cfg.CustomProviders[provider]
+	custom.BaseURL = baseURL
+	if strings.TrimSpace(custom.APIType) == "" {
+		custom.APIType = "chat_completions"
+	}
+	if strings.TrimSpace(custom.APIKeyEnv) == "" {
+		custom.APIKeyEnv = appconfig.CustomProviderAPIKeyEnv(provider)
+	}
+	cfg.CustomProviders[provider] = custom
 }
 
 func terminalTitleForProject(cwd string) string {

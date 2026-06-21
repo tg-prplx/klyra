@@ -89,3 +89,70 @@ func TestTerminalTitleForProject(t *testing.T) {
 		t.Fatalf("unexpected title: %q", title)
 	}
 }
+
+func TestApplyTUISetStoresCustomProviderConfig(t *testing.T) {
+	cfg := appconfig.Default()
+	if err := applyTUISet(&cfg, []string{
+		"provider=custom-openai",
+		"endpoint=https://api.example.test/v1",
+		"api_mode=responses",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	custom, ok := cfg.CustomProviders["custom-openai"]
+	if !ok {
+		t.Fatalf("expected custom provider to be stored: %+v", cfg.CustomProviders)
+	}
+	if custom.BaseURL != "https://api.example.test/v1" {
+		t.Fatalf("unexpected custom provider URL: %+v", custom)
+	}
+	if custom.APIType != "responses" {
+		t.Fatalf("unexpected custom provider API type: %+v", custom)
+	}
+	if custom.APIKeyEnv != "KLYRA_PROVIDER_CUSTOM_OPENAI_API_KEY" {
+		t.Fatalf("unexpected custom provider key env: %+v", custom)
+	}
+}
+
+func TestBuildProviderFromConfigUsesCustomOpenAICompatibleProvider(t *testing.T) {
+	const (
+		keyEnv   = "KLYRA_PROVIDER_CUSTOM_OPENAI_API_KEY"
+		modelEnv = "KLYRA_PROVIDER_CUSTOM_OPENAI_MODEL"
+	)
+	origKey := os.Getenv(keyEnv)
+	origModel := os.Getenv(modelEnv)
+	_ = os.Setenv(keyEnv, "test-key")
+	_ = os.Setenv(modelEnv, "compat-model")
+	defer func() {
+		if origKey == "" {
+			_ = os.Unsetenv(keyEnv)
+		} else {
+			_ = os.Setenv(keyEnv, origKey)
+		}
+		if origModel == "" {
+			_ = os.Unsetenv(modelEnv)
+		} else {
+			_ = os.Setenv(modelEnv, origModel)
+		}
+	}()
+
+	cfg := appconfig.Default()
+	cfg.Provider = "custom-openai"
+	cfg.Model = ""
+	cfg.CustomProviders["custom-openai"] = appconfig.CustomProvider{
+		BaseURL:   "https://api.example.test/v1",
+		APIType:   "chat_completions",
+		APIKeyEnv: keyEnv,
+	}
+
+	provider, model, err := buildProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := provider.(*llm.OpenAIProvider); !ok {
+		t.Fatalf("expected OpenAI-compatible provider, got %T", provider)
+	}
+	if model != "compat-model" {
+		t.Fatalf("expected model from custom provider env, got %q", model)
+	}
+}

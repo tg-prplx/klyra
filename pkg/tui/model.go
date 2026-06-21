@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +21,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	termansi "github.com/charmbracelet/x/ansi"
+	appconfig "klyra/pkg/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -79,6 +81,15 @@ func tickSpinner() tea.Cmd {
 	})
 }
 
+func bellCmd() tea.Cmd {
+	return func() tea.Msg {
+		if bellWriter != nil {
+			_, _ = fmt.Fprint(bellWriter, "\a")
+		}
+		return nil
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -88,6 +99,47 @@ type Handler func(string) (string, error)
 type PickerProvider func(field string) (PickerModal, error)
 
 type InterruptFunc func() bool
+
+type RuntimeSettings struct {
+	Provider               string
+	Model                  string
+	BaseURL                string
+	BaseURLs               map[string]string
+	CustomProviders        map[string]appconfig.CustomProvider
+	Reasoning              string
+	Stream                 bool
+	Sandbox                string
+	Approval               string
+	Mode                   string
+	StoreResponses         bool
+	MaxContext             int
+	MaxOutput              int
+	MaxSteps               int
+	MaxMessages            int
+	MaxInstructions        int
+	ContextCockpit         bool
+	ContextCockpitInject   bool
+	ContextCockpitTokens   int
+	ContextCockpitMaxFiles int
+	ContextCockpitMaxCards int
+	ContextCockpitDiff     bool
+	ContextRetrieval       bool
+	ContextRetrievalTokens int
+	ContextRetrievalChunks int
+	ContextEmbeddings      bool
+	ContextReranker        bool
+	ContextRecipes         bool
+	NegativeContext        bool
+	Skills                 bool
+	FastModel              string
+	EditModel              string
+	DeepModel              string
+	ContextFiles           []string
+	DisabledTools          []string
+	MCPServers             map[string]appconfig.MCPServer
+}
+
+type ApplySettingsFunc func(RuntimeSettings) error
 
 type StreamMsg string
 
@@ -133,6 +185,7 @@ type copyResultMsg struct {
 }
 
 var writeClipboard = clipboard.WriteAll
+var bellWriter io.Writer = os.Stdout
 
 type Config struct {
 	CWD                    string
@@ -142,6 +195,7 @@ type Config struct {
 	Model                  string
 	BaseURL                string
 	BaseURLs               map[string]string
+	CustomProviders        map[string]appconfig.CustomProvider
 	Reasoning              string
 	Stream                 bool
 	Sandbox                string
@@ -173,7 +227,10 @@ type Config struct {
 	DeepModel              string
 	AllTools               []string
 	DisabledTools          []string
+	ContextFiles           []string
+	MCPServers             map[string]appconfig.MCPServer
 	Handler                Handler
+	ApplySettings          ApplySettingsFunc
 	Interrupt              InterruptFunc
 	PickerProvider         PickerProvider
 	Commands               []CommandDef
@@ -202,6 +259,7 @@ type Model struct {
 	model                  string
 	baseURL                string
 	baseURLs               map[string]string
+	customProviders        map[string]appconfig.CustomProvider
 	reasoning              string
 	stream                 bool
 	sandbox                string
@@ -233,6 +291,9 @@ type Model struct {
 	deepModel              string
 	allTools               []string
 	disabledTools          []string
+	contextFiles           []string
+	mcpServers             map[string]appconfig.MCPServer
+	applySettings          ApplySettingsFunc
 	handler                Handler
 	interrupt              InterruptFunc
 	pickerProvider         PickerProvider
@@ -264,6 +325,7 @@ type Model struct {
 	copySelectionEnd       copyPoint
 	copyNotice             string
 	interrupted            bool
+	interrupting           bool
 	mouseFragmentTTL       int
 	sidebarVisible         bool
 	sidebarMode            int
@@ -273,6 +335,8 @@ type Model struct {
 	sidebarScroll          int // scroll offset for sidebar content
 	sidebarCursor          int // selected item in sidebar (-1 = none)
 	requestStartTime       time.Time
+	currentContextTokens   int
+	currentCachedTokens    int
 
 	// Modal state
 	activeModal   modalKind
@@ -345,6 +409,7 @@ func New(cfg Config) Model {
 		model:                  cfg.Model,
 		baseURL:                cfg.BaseURL,
 		baseURLs:               cloneStringMap(cfg.BaseURLs),
+		customProviders:        cloneCustomProviders(cfg.CustomProviders),
 		reasoning:              cfg.Reasoning,
 		stream:                 cfg.Stream,
 		sandbox:                cfg.Sandbox,
@@ -376,6 +441,9 @@ func New(cfg Config) Model {
 		deepModel:              cfg.DeepModel,
 		allTools:               append([]string(nil), cfg.AllTools...),
 		disabledTools:          append([]string(nil), cfg.DisabledTools...),
+		contextFiles:           append([]string(nil), cfg.ContextFiles...),
+		mcpServers:             cloneMCPServers(cfg.MCPServers),
+		applySettings:          cfg.ApplySettings,
 		handler:                handler,
 		interrupt:              cfg.Interrupt,
 		pickerProvider:         cfg.PickerProvider,
@@ -399,6 +467,7 @@ func New(cfg Config) Model {
 	}
 	m.width = 80
 	m.height = 24
+	m.refreshUsageFromLines()
 	m.syncInputSize()
 	m.syncViewport(true)
 	return m
@@ -509,12 +578,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "ctrl+c":
-			if m.busy && m.interrupt != nil && m.interrupt() {
-				m.busy = false
-				m.interrupted = true
-				m.lines = append(m.lines, "", "system: interrupted current run")
+			if m.busy {
+				if m.interrupting {
+					return m, nil
+				}
+				if m.interrupt != nil && m.interrupt() {
+					m.interrupting = true
+					m.lines = append(m.lines, "", "system: interrupting current run")
+					m.syncViewport(true)
+					return m, tea.ClearScreen
+				}
+				m.lines = append(m.lines, "", "system: interrupt unavailable")
 				m.syncViewport(true)
-				return m, tea.ClearScreen
+				return m, nil
 			}
 			return m, tea.Quit
 		case "f2", "ctrl+s":
@@ -683,22 +759,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(runHandler(m.handler, value, true), tickSpinner())
 		}
 	case StreamMsg:
+		if m.interrupting {
+			return m, nil
+		}
 		wasAtBottom := m.viewport.AtBottom()
 		m.streamBuf += string(msg)
 		m.syncViewport(wasAtBottom)
 		return m, nil
 	case ReasoningMsg:
+		if m.interrupting {
+			return m, nil
+		}
 		wasAtBottom := m.viewport.AtBottom()
 		m.reasoningText += string(msg)
 		m.syncViewport(wasAtBottom)
 		return m, nil
 	case ToolStreamMsg:
+		if m.interrupting {
+			return m, nil
+		}
 		wasAtBottom := m.viewport.AtBottom()
 		m.flushLiveAssistantSegment()
 		m.appendToolStream(msg)
 		m.syncViewport(wasAtBottom)
 		return m, nil
 	case ToolProgressMsg:
+		if m.interrupting {
+			return m, nil
+		}
 		wasAtBottom := m.viewport.AtBottom()
 		m.flushLiveAssistantSegment()
 		m.appendToolProgress(msg)
@@ -708,7 +796,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		wasAtBottom := m.viewport.AtBottom()
 		m.approvalReq = &msg
 		m.syncViewport(wasAtBottom)
-		return m, nil
+		return m, bellCmd()
 	case pickerLoadedMsg:
 		if msg.err != nil {
 			m.lines = append(m.lines, "", "error: "+msg.err.Error())
@@ -724,11 +812,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamBuf = ""
 		m.reasoningText = ""
 		m.reasonExpanded = false
+		m.refreshUsageFromLines()
 		m.syncViewport(true)
 		return m, nil
 	case responseMsg:
 		wasAtBottom := m.viewport.AtBottom()
-		interrupted := msg.agentRun && m.interrupted && isCancelError(msg.err)
+		interrupted := msg.agentRun && (m.interrupting || m.interrupted) && isCancelError(msg.err)
 		if msg.agentRun {
 			m.busy = false
 		}
@@ -737,8 +826,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = nil
 			msg.err = nil
 			m.interrupted = false
+			m.interrupting = false
 		} else if msg.agentRun {
 			m.interrupted = false
+			m.interrupting = false
 		}
 		if msg.agentRun {
 			m.flushLiveAssistantSegment()
@@ -865,6 +956,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_, sscanfErr := fmt.Sscanf(usageLine, "[TokenUsage] input=%d cached=%d output=%d reasoning=%d total=%d", &inputT, &cachedT, &outputT, &reasoningT, &totalT)
 				if sscanfErr == nil {
 					hasUsage = true
+					m.currentContextTokens = inputT
+					m.currentCachedTokens = cachedT
 				}
 			}
 			statsLine := fmt.Sprintf("stats: duration=%s", durationStr)
@@ -875,6 +968,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.syncViewport(wasAtBottom)
+		if msg.agentRun {
+			return m, bellCmd()
+		}
 		return m, nil
 	}
 
@@ -1777,10 +1873,7 @@ func (m Model) renderApprovalModal() string {
 	}
 
 	termHeight := m.viewport.Height
-	paddingY := 1
-	if termHeight <= 14 {
-		paddingY = 0
-	}
+	paddingY := modalPaddingY(termHeight)
 
 	// Calculate strict space budgets
 	maxInnerHeight := termHeight - 4 - paddingY*2
@@ -1833,13 +1926,7 @@ func (m Model) renderApprovalModal() string {
 		lines = lines[:maxInnerHeight]
 	}
 
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorAmber).
-		Foreground(colorText).
-		Padding(paddingY, 2).
-		MaxHeight(maxInnerHeight).
-		Render(strings.Join(lines, "\n"))
+	return renderModalFrame(m.width, termHeight, 80, 80, 48, 90, colorAmber, strings.Join(lines, "\n"))
 }
 
 func formatApprovalArgs(args map[string]any, width, maxLines int) string {
@@ -1921,10 +2008,13 @@ func sanitizeApprovalValue(key string, value any) any {
 // ---------------------------------------------------------------------------
 
 func (m *Model) openSettingsModal() {
+	customProvider := m.currentProviderConfig()
 	sm := NewSettingsModal(
 		valueOr(m.provider, "mock"),
 		m.model,
 		m.baseURL,
+		m.providerAPIType(valueOr(m.provider, "mock")),
+		m.providerAPIKeyEnv(valueOr(m.provider, "mock"), customProvider),
 		m.reasoning,
 		valueOr(m.approval, "auto"),
 		valueOr(m.sandbox, "workspace-write"),
@@ -1938,6 +2028,7 @@ func (m *Model) openSettingsModal() {
 		m.contextRetrieval, m.contextRetrievalTokens, m.contextRetrievalChunks, m.contextEmbeddings, m.contextReranker,
 		m.contextRecipes, m.negativeContext, m.skills,
 		m.fastModel, m.editModel, m.deepModel,
+		m.contextFiles, m.mcpServers,
 	)
 	m.settingsModal = &sm
 	m.activeModal = modalSettings
@@ -2125,9 +2216,13 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.provider = sm.GetValue("provider")
 		m.model = sm.GetValue("model")
 		m.baseURL = sm.GetValue("endpoint")
+		apiMode := sm.GetValue("api_mode")
 		m.stream = sm.GetValue("stream") != "off"
 		if m.baseURLs == nil {
 			m.baseURLs = map[string]string{}
+		}
+		if m.customProviders == nil {
+			m.customProviders = map[string]appconfig.CustomProvider{}
 		}
 		for _, provider := range []string{"openai", "local", "ollama", "anthropic", "gemini"} {
 			key := "endpoint_" + provider
@@ -2138,8 +2233,15 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.baseURLs[provider] = value
 			}
 		}
-		if endpoint := strings.TrimSpace(m.baseURL); endpoint != "" {
-			m.baseURLs[strings.ToLower(valueOr(m.provider, "openai"))] = endpoint
+		m.setProviderEndpoint(m.provider, m.baseURL)
+		currentProvider := appconfig.CanonicalProviderName(valueOr(m.provider, "mock"))
+		if !appconfig.IsBuiltInProvider(currentProvider) {
+			custom := m.customProviders[currentProvider]
+			custom.APIType = appconfig.NormalizeProviderAPIType(apiMode)
+			if strings.TrimSpace(custom.APIKeyEnv) == "" {
+				custom.APIKeyEnv = appconfig.CustomProviderAPIKeyEnv(currentProvider)
+			}
+			m.customProviders[currentProvider] = custom
 		}
 		m.reasoning = sm.GetValue("reasoning")
 		m.approval = sm.GetValue("approval")
@@ -2188,12 +2290,25 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.fastModel = sm.GetValue("fast_model")
 		m.editModel = sm.GetValue("edit_model")
 		m.deepModel = sm.GetValue("deep_model")
+		m.contextFiles = parseDelimitedList(sm.GetValue("context_files"))
+		m.cartCount = len(m.contextFiles)
+		for name, server := range m.mcpServers {
+			fieldName := "mcp_enabled_" + name
+			value := sm.GetValue(fieldName)
+			if value == "" {
+				continue
+			}
+			enabled := value != "off"
+			server.Enabled = boolPtr(enabled)
+			m.mcpServers[name] = server
+		}
 
 		// Build /set command for handler
 		parts := []string{"/set",
 			"provider=" + m.provider,
 			"model=" + m.model,
 			"endpoint=" + m.baseURL,
+			"api_mode=" + appconfig.NormalizeProviderAPIType(apiMode),
 			"stream=" + onOff(m.stream),
 		}
 		for _, provider := range []string{"openai", "local", "ollama", "anthropic", "gemini"} {
@@ -2230,6 +2345,9 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			"edit_model="+m.editModel,
 			"deep_model="+m.deepModel,
 		)
+		if len(m.contextFiles) > 0 {
+			parts = append(parts, "context_files="+strings.Join(m.contextFiles, ","))
+		}
 		cmdText := strings.Join(parts, " ")
 
 		// Handle API keys — set env vars at runtime
@@ -2244,6 +2362,13 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				keysToSave[envField.envVar] = val
 			}
 		}
+		if val := sm.GetValue("provider_key"); val != "" {
+			envVar := m.providerAPIKeyEnv(m.provider, m.currentProviderConfig())
+			if envVar != "" {
+				_ = setEnvIfChanged(envVar, val)
+				keysToSave[envVar] = val
+			}
+		}
 		if len(keysToSave) > 0 {
 			_ = saveEnvFile(m.cwd, keysToSave)
 		}
@@ -2251,6 +2376,9 @@ func (m Model) updateSettingsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closeModal()
 		m.lines = append(m.lines, "system: settings saved")
 		m.syncViewport(true)
+		if m.applySettings != nil {
+			return m, saveRuntimeSettingsCmd(m.applySettings, m.runtimeSettings())
+		}
 		return m, runHandler(m.handler, cmdText, false)
 	}
 	if len(msg.Runes) > 0 {
@@ -2340,6 +2468,9 @@ func (m Model) updateFeaturesModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closeModal()
 		m.lines = append(m.lines, "system: features saved")
 		m.syncViewport(true)
+		if m.applySettings != nil {
+			return m, saveRuntimeSettingsCmd(m.applySettings, m.runtimeSettings())
+		}
 		return m, runHandler(m.handler, cmdText, false)
 	}
 	return m, nil
@@ -2395,6 +2526,9 @@ func (m Model) updateToolsModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.closeModal()
 		m.lines = append(m.lines, "system: tools configuration saved")
 		m.syncViewport(true)
+		if m.applySettings != nil {
+			return m, saveRuntimeSettingsCmd(m.applySettings, m.runtimeSettings())
+		}
 		return m, runHandler(m.handler, cmdText, false)
 	}
 	return m, nil
@@ -2535,11 +2669,15 @@ func (m Model) renderFooter() string {
 	modelStyle := lipgloss.NewStyle().Foreground(colorDim)
 
 	leftParts := []string{
-		"/help",
 		"/status",
 		"/mode",
 		"/attach",
 	}
+	ctxFooter := fmt.Sprintf("ctx %s", formatWithCommas(m.currentContextTokens))
+	if m.maxContext > 0 {
+		ctxFooter += "/" + formatWithCommas(m.maxContext)
+	}
+	leftParts = append(leftParts, ctxFooter)
 	originalLeftPlain := " " + strings.Join(leftParts, "  ")
 	leftPlain := originalLeftPlain
 
@@ -2771,14 +2909,17 @@ func (m *Model) applyOptimisticCommand(value string) {
 			switch key {
 			case "provider":
 				m.provider = value
+				canonical := appconfig.CanonicalProviderName(value)
+				if appconfig.IsBuiltInProvider(canonical) {
+					m.baseURL = m.baseURLs[canonical]
+				} else {
+					m.baseURL = m.customProviders[canonical].BaseURL
+				}
 			case "model":
 				m.model = value
 			case "endpoint":
 				m.baseURL = value
-				if m.baseURLs == nil {
-					m.baseURLs = map[string]string{}
-				}
-				m.baseURLs[strings.ToLower(valueOr(m.provider, "openai"))] = value
+				m.setProviderEndpoint(m.provider, value)
 			case "endpoint_openai", "openai_endpoint":
 				m.setProviderEndpoint("openai", value)
 			case "endpoint_local", "local_endpoint":
@@ -2791,6 +2932,19 @@ func (m *Model) applyOptimisticCommand(value string) {
 				m.setProviderEndpoint("gemini", value)
 			case "stream":
 				m.stream = value != "off"
+			case "api_mode", "api-mode":
+				provider := appconfig.CanonicalProviderName(valueOr(m.provider, "mock"))
+				if !appconfig.IsBuiltInProvider(provider) {
+					if m.customProviders == nil {
+						m.customProviders = map[string]appconfig.CustomProvider{}
+					}
+					custom := m.customProviders[provider]
+					custom.APIType = appconfig.NormalizeProviderAPIType(value)
+					if strings.TrimSpace(custom.APIKeyEnv) == "" {
+						custom.APIKeyEnv = appconfig.CustomProviderAPIKeyEnv(provider)
+					}
+					m.customProviders[provider] = custom
+				}
 			case "reasoning":
 				m.reasoning = value
 			case "approval":
@@ -2881,6 +3035,12 @@ func (m *Model) applyOptimisticCommand(value string) {
 	case "/provider":
 		m.provider = args[1]
 		m.model = ""
+		canonical := appconfig.CanonicalProviderName(m.provider)
+		if appconfig.IsBuiltInProvider(canonical) {
+			m.baseURL = m.baseURLs[canonical]
+		} else {
+			m.baseURL = m.customProviders[canonical].BaseURL
+		}
 	case "/model":
 		m.model = strings.Join(args[1:], " ")
 	case "/endpoint":
@@ -3046,19 +3206,77 @@ func parsePositiveInt(value string) int {
 	return parsed
 }
 
+func (m *Model) currentProviderConfig() appconfig.CustomProvider {
+	provider := appconfig.CanonicalProviderName(valueOr(m.provider, "mock"))
+	if appconfig.IsBuiltInProvider(provider) {
+		return appconfig.CustomProvider{}
+	}
+	if m.customProviders == nil {
+		return appconfig.CustomProvider{}
+	}
+	return m.customProviders[provider]
+}
+
+func (m *Model) providerAPIType(provider string) string {
+	switch appconfig.CanonicalProviderName(provider) {
+	case "openai":
+		return "responses"
+	case "local", "ollama":
+		return "chat_completions"
+	case "anthropic", "gemini", "mock":
+		return ""
+	default:
+		custom := m.currentProviderConfig()
+		return appconfig.NormalizeProviderAPIType(custom.APIType)
+	}
+}
+
+func (m *Model) providerAPIKeyEnv(provider string, custom appconfig.CustomProvider) string {
+	switch appconfig.CanonicalProviderName(provider) {
+	case "openai", "local":
+		return "OPENAI_API_KEY"
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
+	case "gemini":
+		return "GEMINI_API_KEY"
+	case "ollama", "mock":
+		return ""
+	default:
+		if strings.TrimSpace(custom.APIKeyEnv) != "" {
+			return custom.APIKeyEnv
+		}
+		return appconfig.CustomProviderAPIKeyEnv(provider)
+	}
+}
+
 func (m *Model) setProviderEndpoint(provider, endpoint string) {
-	provider = strings.ToLower(strings.TrimSpace(provider))
+	provider = appconfig.CanonicalProviderName(provider)
 	if provider == "" {
 		provider = "openai"
 	}
-	if m.baseURLs == nil {
-		m.baseURLs = map[string]string{}
-	}
 	endpoint = strings.TrimSpace(endpoint)
-	if endpoint == "" {
-		delete(m.baseURLs, provider)
+	if appconfig.IsBuiltInProvider(provider) {
+		if m.baseURLs == nil {
+			m.baseURLs = map[string]string{}
+		}
+		if endpoint == "" {
+			delete(m.baseURLs, provider)
+		} else {
+			m.baseURLs[provider] = endpoint
+		}
 	} else {
-		m.baseURLs[provider] = endpoint
+		if m.customProviders == nil {
+			m.customProviders = map[string]appconfig.CustomProvider{}
+		}
+		custom := m.customProviders[provider]
+		custom.BaseURL = endpoint
+		if strings.TrimSpace(custom.APIType) == "" {
+			custom.APIType = "chat_completions"
+		}
+		if strings.TrimSpace(custom.APIKeyEnv) == "" {
+			custom.APIKeyEnv = appconfig.CustomProviderAPIKeyEnv(provider)
+		}
+		m.customProviders[provider] = custom
 	}
 	if strings.EqualFold(valueOr(m.provider, "openai"), provider) {
 		m.baseURL = endpoint
@@ -3095,6 +3313,20 @@ func centerOverlay(width, height int, content string) string {
 	}
 	if height <= 0 {
 		height = 20
+	}
+	if lipgloss.Height(content) > height {
+		lines := strings.Split(content, "\n")
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		content = strings.Join(lines, "\n")
+	}
+	if lipgloss.Width(content) > width {
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			lines[i] = termansi.Truncate(line, width, "")
+		}
+		content = strings.Join(lines, "\n")
 	}
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, content)
 }
@@ -3190,9 +3422,135 @@ func (m *Model) appendToolProgress(msg ToolProgressMsg) {
 	if strings.TrimSpace(msg.Tool) == "" {
 		return
 	}
+	for i := len(m.lines) - 1; i >= 0; i-- {
+		switch {
+		case strings.HasPrefix(m.lines[i], "toolprogress:"):
+			expanded, raw := parseCollapsiblePayload(m.lines[i], "toolprogress")
+			var existing ToolProgressMsg
+			if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+				continue
+			}
+			if !sameToolProgress(existing, msg) {
+				continue
+			}
+			merged := mergeToolProgress(existing, msg)
+			if data, err := json.Marshal(merged); err == nil {
+				state := "0"
+				if expanded {
+					state = "1"
+				}
+				m.lines[i] = "toolprogress:" + state + ":" + string(data)
+			}
+			return
+		case strings.HasPrefix(m.lines[i], "toolstream:"):
+			expanded, raw := parseCollapsiblePayload(m.lines[i], "toolstream")
+			var existing ToolStreamMsg
+			if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+				continue
+			}
+			if !sameToolStreamWithProgress(existing, msg) {
+				continue
+			}
+			merged := mergeToolProgress(ToolProgressMsg{
+				Tool: existing.Name,
+				ID:   existing.ID,
+				Args: parseToolArguments(existing.Arguments),
+			}, msg)
+			if data, err := json.Marshal(merged); err == nil {
+				state := "0"
+				if expanded {
+					state = "1"
+				}
+				m.lines[i] = "toolprogress:" + state + ":" + string(data)
+			}
+			return
+		}
+	}
 	if data, err := json.Marshal(msg); err == nil {
 		m.lines = append(m.lines, "toolprogress:0:"+string(data))
 	}
+}
+
+func (m *Model) refreshUsageFromLines() {
+	m.currentContextTokens = 0
+	m.currentCachedTokens = 0
+	for i := len(m.lines) - 1; i >= 0; i-- {
+		if !strings.HasPrefix(m.lines[i], "stats: ") {
+			continue
+		}
+		input, cached, ok := parseUsageStatsLine(m.lines[i])
+		if !ok {
+			continue
+		}
+		m.currentContextTokens = input
+		m.currentCachedTokens = cached
+		return
+	}
+}
+
+func parseUsageStatsLine(line string) (input int, cached int, ok bool) {
+	for _, field := range strings.Fields(line) {
+		switch {
+		case strings.HasPrefix(field, "input="):
+			if parsed, err := strconv.Atoi(strings.TrimPrefix(field, "input=")); err == nil {
+				input = parsed
+				ok = true
+			}
+		case strings.HasPrefix(field, "cached="):
+			if parsed, err := strconv.Atoi(strings.TrimPrefix(field, "cached=")); err == nil {
+				cached = parsed
+			}
+		}
+	}
+	return input, cached, ok
+}
+
+func sameToolProgress(existing, next ToolProgressMsg) bool {
+	if strings.TrimSpace(existing.ID) != "" && strings.TrimSpace(next.ID) != "" {
+		return existing.ID == next.ID
+	}
+	return strings.TrimSpace(existing.Tool) != "" && existing.Tool == next.Tool
+}
+
+func sameToolStreamWithProgress(existing ToolStreamMsg, next ToolProgressMsg) bool {
+	if strings.TrimSpace(existing.ID) != "" && strings.TrimSpace(next.ID) != "" {
+		return existing.ID == next.ID
+	}
+	return strings.TrimSpace(existing.Name) != "" && existing.Name == next.Tool
+}
+
+func mergeToolProgress(existing, next ToolProgressMsg) ToolProgressMsg {
+	if strings.TrimSpace(next.Phase) != "" {
+		existing.Phase = next.Phase
+	}
+	if strings.TrimSpace(next.Tool) != "" {
+		existing.Tool = next.Tool
+	}
+	if strings.TrimSpace(next.ID) != "" {
+		existing.ID = next.ID
+	}
+	if len(next.Args) > 0 {
+		existing.Args = next.Args
+	}
+	if strings.TrimSpace(next.Output) != "" {
+		existing.Output = next.Output
+	}
+	if strings.TrimSpace(next.Error) != "" {
+		existing.Error = next.Error
+	}
+	return existing
+}
+
+func parseToolArguments(raw string) map[string]any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		return nil
+	}
+	return args
 }
 
 func (m *Model) toggleLatestThoughts() bool {
@@ -4360,6 +4718,129 @@ func cloneStringMap(values map[string]string) map[string]string {
 		cloned[strings.ToLower(strings.TrimSpace(key))] = value
 	}
 	return cloned
+}
+
+func cloneCustomProviders(values map[string]appconfig.CustomProvider) map[string]appconfig.CustomProvider {
+	if len(values) == 0 {
+		return map[string]appconfig.CustomProvider{}
+	}
+	cloned := make(map[string]appconfig.CustomProvider, len(values))
+	for key, value := range values {
+		cloned[appconfig.CanonicalProviderName(key)] = value
+	}
+	return cloned
+}
+
+func cloneMCPServers(values map[string]appconfig.MCPServer) map[string]appconfig.MCPServer {
+	if len(values) == 0 {
+		return map[string]appconfig.MCPServer{}
+	}
+	cloned := make(map[string]appconfig.MCPServer, len(values))
+	for key, value := range values {
+		next := value
+		if value.Args != nil {
+			next.Args = append([]string(nil), value.Args...)
+		}
+		if value.Env != nil {
+			next.Env = make(map[string]string, len(value.Env))
+			for envKey, envValue := range value.Env {
+				next.Env[envKey] = envValue
+			}
+		}
+		if value.Enabled != nil {
+			enabled := *value.Enabled
+			next.Enabled = &enabled
+		}
+		cloned[key] = next
+	}
+	return cloned
+}
+
+func boolPtr(value bool) *bool {
+	v := value
+	return &v
+}
+
+func parseDelimitedList(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		switch r {
+		case ',', ';', '|', '\n', '\r', '\t':
+			return true
+		default:
+			return false
+		}
+	})
+	out := make([]string, 0, len(fields))
+	seen := map[string]struct{}{}
+	for _, field := range fields {
+		item := strings.TrimSpace(field)
+		if item == "" {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func (m Model) runtimeSettings() RuntimeSettings {
+	return RuntimeSettings{
+		Provider:               m.provider,
+		Model:                  m.model,
+		BaseURL:                m.baseURL,
+		BaseURLs:               cloneStringMap(m.baseURLs),
+		CustomProviders:        cloneCustomProviders(m.customProviders),
+		Reasoning:              m.reasoning,
+		Stream:                 m.stream,
+		Sandbox:                m.sandbox,
+		Approval:               m.approval,
+		Mode:                   m.mode,
+		StoreResponses:         m.storeResponses,
+		MaxContext:             m.maxContext,
+		MaxOutput:              m.maxOutput,
+		MaxSteps:               m.maxSteps,
+		MaxMessages:            m.maxMessages,
+		MaxInstructions:        m.maxInstructions,
+		ContextCockpit:         m.contextCockpit,
+		ContextCockpitInject:   m.contextCockpitInject,
+		ContextCockpitTokens:   m.contextCockpitTokens,
+		ContextCockpitMaxFiles: m.contextCockpitMaxFiles,
+		ContextCockpitMaxCards: m.contextCockpitMaxCards,
+		ContextCockpitDiff:     m.contextCockpitDiff,
+		ContextRetrieval:       m.contextRetrieval,
+		ContextRetrievalTokens: m.contextRetrievalTokens,
+		ContextRetrievalChunks: m.contextRetrievalChunks,
+		ContextEmbeddings:      m.contextEmbeddings,
+		ContextReranker:        m.contextReranker,
+		ContextRecipes:         m.contextRecipes,
+		NegativeContext:        m.negativeContext,
+		Skills:                 m.skills,
+		FastModel:              m.fastModel,
+		EditModel:              m.editModel,
+		DeepModel:              m.deepModel,
+		ContextFiles:           append([]string(nil), m.contextFiles...),
+		DisabledTools:          append([]string(nil), m.disabledTools...),
+		MCPServers:             cloneMCPServers(m.mcpServers),
+	}
+}
+
+func saveRuntimeSettingsCmd(apply ApplySettingsFunc, settings RuntimeSettings) tea.Cmd {
+	return func() tea.Msg {
+		if apply == nil {
+			return responseMsg{}
+		}
+		if err := apply(settings); err != nil {
+			return responseMsg{output: "", err: err}
+		}
+		return responseMsg{}
+	}
 }
 
 func max(left, right int) int {

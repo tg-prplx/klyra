@@ -148,10 +148,7 @@ func (p *PickerModal) View(termWidth, termHeight int) string {
 	}
 
 	// Calculate vertical budget
-	paddingY := 1
-	if termHeight > 0 && termHeight <= 14 {
-		paddingY = 0
-	}
+	paddingY := modalPaddingY(termHeight)
 	showHints := termHeight > 8
 
 	// Apply scrolling to options
@@ -205,73 +202,7 @@ func (p *PickerModal) View(termWidth, termHeight int) string {
 				hintKeyStyle.Render("Esc")+hintTextStyle.Render(" cancel"))
 	}
 
-	// Width: use 60% of terminal for pickers, clamped to [40, 72]
-	boxWidth := p.Width
-	if boxWidth <= 0 {
-		boxWidth = 56
-	}
-	if termWidth > 0 {
-		adaptive := termWidth * 60 / 100
-		if adaptive > 72 {
-			adaptive = 72
-		}
-		if adaptive < 40 {
-			adaptive = max(32, termWidth-4)
-		}
-		if adaptive > boxWidth {
-			boxWidth = adaptive
-		}
-		if boxWidth > termWidth-4 {
-			boxWidth = termWidth - 4
-		}
-	}
-	if boxWidth < 40 {
-		boxWidth = 40
-	}
-	contentWidth := max(20, boxWidth-6)
-
-	var fitted []string
-	for _, line := range allLines {
-		fitted = append(fitted, lipgloss.NewStyle().MaxWidth(contentWidth).Render(line))
-	}
-
-	// Hard-cap height to prevent any overflow past the terminal.
-	// In Lipgloss, MaxHeight restricts the content area (inner size).
-	// We want outer height to be at most termHeight - 2 to leave 1-line margin top/bottom.
-	// Outer height = content + borders (2) + paddingY * 2.
-	maxInnerHeight := termHeight - 4 - paddingY*2
-	if maxInnerHeight < 2 {
-		maxInnerHeight = 2
-	}
-
-	joined := strings.Join(fitted, "\n")
-	flatLines := strings.Split(joined, "\n")
-
-	// Manually truncate the flat lines array to strictly guarantee that the rendered box
-	// height does not exceed maxInnerHeight lines under any circumstances.
-	if len(flatLines) > maxInnerHeight {
-		flatLines = flatLines[:maxInnerHeight]
-	}
-	content := strings.Join(flatLines, "\n")
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorBrand).
-		Foreground(colorText).
-		Padding(paddingY, 2).
-		Width(boxWidth).
-		MaxHeight(maxInnerHeight).
-		Render(content)
-
-	// Center horizontally
-	if termWidth > 0 {
-		box = lipgloss.NewStyle().
-			Width(termWidth).
-			Align(lipgloss.Center).
-			Render(box)
-	}
-
-	return box
+	return renderModalFrame(termWidth, termHeight, max(p.Width, 56), 60, 40, 72, colorBrand, strings.Join(allLines, "\n"))
 }
 
 // ---------------------------------------------------------------------------
