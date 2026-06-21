@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -337,15 +339,22 @@ func TestEditModeBlocksWriteFileOverExistingFile(t *testing.T) {
 	}
 }
 
-func TestCreateFileRefusesExistingFile(t *testing.T) {
+func TestCreateFileOverwritesExistingFile(t *testing.T) {
 	dir := t.TempDir()
-	writeTestFile(t, dir, "new.go", "package main\n")
+	writeTestFile(t, dir, "new.go", "old\n")
 	_, err := NewDefaultRegistry().RunWithPolicy(context.Background(), dir, "workspace-write", "edit", []string{"new.go"}, llm.ToolCall{
 		Name:      "create_file",
-		Arguments: map[string]any{"path": "new.go", "content": "package main\n"},
+		Arguments: map[string]any{"path": "new.go", "content": "new\n"},
 	})
-	if err == nil {
-		t.Fatal("expected create_file to refuse overwrite")
+	if err != nil {
+		t.Fatalf("create_file overwrite failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "new.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "new\n" {
+		t.Fatalf("create_file content = %q, want %q", got, "new\n")
 	}
 }
 

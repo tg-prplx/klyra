@@ -182,10 +182,10 @@ type FileCreator struct{}
 func (FileCreator) Spec() llm.ToolSpec {
 	return llm.ToolSpec{
 		Name:        "create_file",
-		Description: "Create a new file only. Use directly when the user asks for a known new file; for skills, keep files under .klyra/skills/<name>/ or .agentcli/skills/<name>/.",
+		Description: "Write a complete file, replacing existing content if present. For focused changes, use edit_file.",
 		Parameters: objectSchema(map[string]any{
 			"path":        stringProperty("Relative file path."),
-			"content":     stringProperty("Complete new file content."),
+			"content":     stringProperty("Complete file content."),
 			"description": stringProperty("Short internal note for this file, shown beside it in file lists."),
 		}, "path", "content"),
 	}
@@ -208,18 +208,13 @@ func (FileCreator) Run(_ context.Context, inv Invocation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if _, err := os.Stat(target); err == nil {
-		return Result{}, fmt.Errorf("create_file refuses to overwrite existing file %s; use edit_file", requestedPath)
-	} else if !os.IsNotExist(err) {
-		return Result{}, err
-	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return Result{}, err
 	}
 	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
 		return Result{}, err
 	}
-	output := fmt.Sprintf("created %s (%d bytes)", requestedPath, len(content))
+	output := fmt.Sprintf("wrote %s (%d bytes)", requestedPath, len(content))
 	if note := cleanFileNote(description); note != "" {
 		if err := saveFileNote(inv.CWD, requestedPath, note); err != nil {
 			output += fmt.Sprintf("; description note failed: %v", err)

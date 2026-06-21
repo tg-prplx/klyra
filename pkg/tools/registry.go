@@ -211,7 +211,7 @@ var compactToolDescriptions = map[string]string{
 	"read_symbol":           "Read one symbol.",
 	"read_go_symbol":        "Read one Go symbol.",
 	"read_file":             "Read file lines.",
-	"create_file":           "Create a new file.",
+	"create_file":           "Write a complete file.",
 	"edit_file":             "Edit an existing file.",
 	"insert_lines":          "Insert file lines.",
 	"replace_lines":         "Replace file lines.",
