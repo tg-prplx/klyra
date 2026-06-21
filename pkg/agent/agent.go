@@ -229,6 +229,7 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 	successfulReadCalls := map[string]tools.Result{}
 	repeatedReadCalls := map[string]int{}
 	successfulPlanCalls := map[string]tools.Result{}
+	successfulWriteCalls := map[string]int{}
 	runCapabilities := map[string]bool{}
 	guideCompleted := false
 	repeatedGuideCalls := 0
@@ -375,6 +376,13 @@ func (a *Agent) RunConversationWithAttachments(ctx context.Context, history []ll
 			if err == nil && tools.HasSideEffects(call.Name) {
 				successfulReadCalls = map[string]tools.Result{}
 				repeatedReadCalls = map[string]int{}
+				if call.Name == "create_file" || call.Name == "write_file" {
+					successfulWriteCalls[signature]++
+					if successfulWriteCalls[signature] >= 3 {
+						a.printUsage(lastUsage)
+						return RunResult{Final: final, Messages: sanitizeMessagesForStorage(window.Messages()), Usage: lastUsage, ContextDebug: lastDebug}, fmt.Errorf("agent stopped after repeated %s recreate loop; use edit_file for changes to existing files", call.Name)
+					}
+				}
 			} else if err == nil && tools.SuppressRepeatedSuccessfulCall(call.Name) {
 				successfulReadCalls[signature] = result
 			}
@@ -634,10 +642,12 @@ Use tools deliberately:
 - If a needed tool is hidden, call discover_tools once with the smallest capability set.
 - Prefer built-in tools over bash; use bash only when no built-in tool fits.
 - Do not inspect broad maps, sessions, logs, .env, or unrelated files without need.
-- Existing files: use edit_file. New files: use create_file. Never overwrite existing files with write_file.
+- Existing files: ALWAYS use edit_file. New files: use create_file. NEVER use create_file or write_file to overwrite an existing file.
+- If create_file or write_file is rejected because the file exists, switch to edit_file immediately. Do not retry the same tool.
 - For new projects, create the first concrete file directly; do not loop on empty project_map.
 - For existing code, gather the smallest slice: project_map/search -> outline/symbol -> short read_file.
-- After a tool failure or duplicate result, change strategy once; do not repeat the same call.
+- After a tool failure or duplicate result, change strategy once; do not repeat the same call with the same arguments.
+- After two consecutive failures on the same tool, stop and answer the user with what you know.
 - Verify with the cheapest relevant check, then answer with changed files, checks, and residual risk.
 - Never edit outside the workspace.`)
 }
@@ -661,11 +671,11 @@ func toolErrorGuidance(call llm.ToolCall, result tools.Result, runErr error) str
 		return "Do not retry the same patch. Inspect the target text, then use edit_file or rebuild the patch with exact context."
 	case "write_file":
 		if strings.Contains(text, "overwrite") || strings.Contains(text, "existing file") {
-			return "Use edit_file for existing files."
+			return "Use edit_file for existing files. Do not recreate or overwrite files that already exist."
 		}
 	case "create_file":
-		if strings.Contains(text, "overwrite") || strings.Contains(text, "exists") {
-			return "The file already exists. Inspect it and edit it with edit_file instead of create_file."
+		if strings.Contains(text, "overwrite") || strings.Contains(text, "existing file") || strings.Contains(text, "refuses") {
+			return "The file already exists. Use edit_file with exact old/new text for focused changes. Do not recreate the file with create_file."
 		}
 	case "edit_file":
 		if strings.Contains(text, "old text not found") || strings.Contains(text, "matches") {

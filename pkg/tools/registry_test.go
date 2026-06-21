@@ -2,8 +2,6 @@ package tools
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -339,22 +337,29 @@ func TestEditModeBlocksWriteFileOverExistingFile(t *testing.T) {
 	}
 }
 
-func TestCreateFileOverwritesExistingFile(t *testing.T) {
+func TestCreateFileBlocksOverwriteExistingFileInEditMode(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, dir, "new.go", "old\n")
 	_, err := NewDefaultRegistry().RunWithPolicy(context.Background(), dir, "workspace-write", "edit", []string{"new.go"}, llm.ToolCall{
 		Name:      "create_file",
 		Arguments: map[string]any{"path": "new.go", "content": "new\n"},
 	})
-	if err != nil {
-		t.Fatalf("create_file overwrite failed: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "create_file refuses to overwrite existing file") {
+		t.Fatalf("expected create_file overwrite block in edit mode, got %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "new.go"))
+}
+
+func TestCreateFileAllowsNewFileInEditMode(t *testing.T) {
+	dir := t.TempDir()
+	result, err := NewDefaultRegistry().RunWithPolicy(context.Background(), dir, "workspace-write", "edit", nil, llm.ToolCall{
+		Name:      "create_file",
+		Arguments: map[string]any{"path": "brand_new.go", "content": "package main\n"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(data); got != "new\n" {
-		t.Fatalf("create_file content = %q, want %q", got, "new\n")
+	if !strings.Contains(result.Output, "wrote brand_new.go") {
+		t.Fatalf("expected create_file output for new file, got: %s", result.Output)
 	}
 }
 

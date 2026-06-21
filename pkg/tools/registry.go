@@ -454,7 +454,7 @@ func isProjectSkillBundlePath(path string) bool {
 
 func enforceWriteToolUsage(cwd, mode string, call llm.ToolCall) error {
 	mode = strings.ToLower(strings.TrimSpace(mode))
-	if call.Name != "write_file" || (mode != "edit" && mode != "refactor" && mode != "repair") {
+	if (call.Name != "write_file" && call.Name != "create_file") || (mode != "edit" && mode != "refactor" && mode != "repair") {
 		return nil
 	}
 	path, _ := call.Arguments["path"].(string)
@@ -466,6 +466,9 @@ func enforceWriteToolUsage(cwd, mode string, call llm.ToolCall) error {
 		return err
 	}
 	if _, err := os.Stat(target); err == nil {
+		if call.Name == "create_file" {
+			return fmt.Errorf("create_file refuses to overwrite existing file %s in %s mode; use edit_file for focused changes to existing files", path, mode)
+		}
 		return fmt.Errorf("write_file refuses to overwrite existing file %s in %s mode; use edit_file", path, mode)
 	} else if !os.IsNotExist(err) {
 		return err
@@ -554,7 +557,8 @@ func isMCPTool(name string) bool {
 func SuppressRepeatedSuccessfulCall(name string) bool {
 	switch name {
 	case "discover_tools", "project_map", "git_status", "git_diff", "workspace_checkpoints", "policy_check",
-		"list_files", "read_file", "file_outline", "read_symbol", "read_go_symbol", "search":
+		"list_files", "read_file", "file_outline", "read_symbol", "read_go_symbol", "search",
+		"create_file", "write_file":
 		return true
 	default:
 		return false

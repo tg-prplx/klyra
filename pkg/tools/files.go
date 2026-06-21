@@ -208,6 +208,10 @@ func (FileCreator) Run(_ context.Context, inv Invocation) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	overwriting := false
+	if info, statErr := os.Stat(target); statErr == nil && !info.IsDir() {
+		overwriting = true
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return Result{}, err
 	}
@@ -215,6 +219,9 @@ func (FileCreator) Run(_ context.Context, inv Invocation) (Result, error) {
 		return Result{}, err
 	}
 	output := fmt.Sprintf("wrote %s (%d bytes)", requestedPath, len(content))
+	if overwriting {
+		output += "; WARNING: overwrote existing file; prefer edit_file for focused changes to existing files"
+	}
 	if note := cleanFileNote(description); note != "" {
 		if err := saveFileNote(inv.CWD, requestedPath, note); err != nil {
 			output += fmt.Sprintf("; description note failed: %v", err)
