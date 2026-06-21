@@ -1309,13 +1309,13 @@ func (m Model) renderSidebar(height int) string {
 		labelStyle.Render("F7 next · F8 " + []string{"→right", "→left"}[m.sidebarPosition]),
 	}
 
-	// Calculate scrollable area height
-	scrollAreaHeight := max(1, height-len(headerLines)-len(footerLines)-2)
+	scrollAreaHeight := m.sidebarScrollAreaHeight(height, len(headerLines), len(footerLines))
 
 	// Apply scroll offset
 	scroll := m.sidebarScroll
-	if scroll > len(contentLines)-scrollAreaHeight {
-		scroll = max(0, len(contentLines)-scrollAreaHeight)
+	maxScroll := m.sidebarMaxScrollForContent(height, len(contentLines), len(headerLines), len(footerLines))
+	if scroll > maxScroll {
+		scroll = maxScroll
 	}
 	if scroll < 0 {
 		scroll = 0
@@ -1356,6 +1356,20 @@ func (m Model) renderSidebar(height int) string {
 		BorderForeground(colorSeparator).
 		Padding(0, 1).
 		Render(content)
+}
+
+func (m Model) sidebarScrollAreaHeight(height, headerLines, footerLines int) int {
+	return max(1, height-headerLines-footerLines-2)
+}
+
+func (m Model) sidebarMaxScrollForContent(height, contentCount, headerLines, footerLines int) int {
+	scrollAreaHeight := m.sidebarScrollAreaHeight(height, headerLines, footerLines)
+	visibleContentAtBottom := max(1, scrollAreaHeight-1)
+	maxScroll := contentCount - visibleContentAtBottom
+	if maxScroll < 0 {
+		return 0
+	}
+	return maxScroll
 }
 
 func (m Model) sidebarFileLines(width int) []string {
@@ -1607,10 +1621,9 @@ func (m *Model) sidebarScrollUp(n int) {
 // sidebarScrollDown scrolls the sidebar content down by n lines.
 func (m *Model) sidebarScrollDown(n int) {
 	m.sidebarScroll += n
-	maxScroll := m.sidebarContentLineCount() - 5
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
+	headerLines := 3
+	footerLines := 2
+	maxScroll := m.sidebarMaxScrollForContent(m.viewport.Height, m.sidebarContentLineCount(), headerLines, footerLines)
 	if m.sidebarScroll > maxScroll {
 		m.sidebarScroll = maxScroll
 	}
@@ -2522,12 +2535,13 @@ func (m Model) renderFooter() string {
 	modelStyle := lipgloss.NewStyle().Foreground(colorDim)
 
 	leftParts := []string{
-		cmdSlashStyle.Render("/") + cmdHintStyle.Render("help"),
-		cmdSlashStyle.Render("/") + cmdHintStyle.Render("status"),
-		cmdSlashStyle.Render("/") + cmdHintStyle.Render("mode"),
-		cmdSlashStyle.Render("/") + cmdHintStyle.Render("attach"),
+		"/help",
+		"/status",
+		"/mode",
+		"/attach",
 	}
-	leftFooter := " " + strings.Join(leftParts, "  ")
+	originalLeftPlain := " " + strings.Join(leftParts, "  ")
+	leftPlain := originalLeftPlain
 
 	copyHint := "F6 copy"
 	if m.copyMode {
@@ -2538,34 +2552,95 @@ func (m Model) renderFooter() string {
 		sidebarHint = "F7 " + []string{"files", "diff", "context"}[m.sidebarMode]
 	}
 	posHint := "F8 " + []string{"→right", "→left"}[m.sidebarPosition]
-	hints := []string{"F2 settings", "F5 features", sidebarHint, posHint, copyHint}
+	optionalHints := []string{"F2 settings", "F5 features"}
 	if m.contextDebug != "" {
 		if m.debugExpanded {
-			hints = append([]string{"F3 hide context"}, hints...)
+			optionalHints = append([]string{"F3 hide context"}, optionalHints...)
 		} else {
-			hints = append([]string{"F3 context"}, hints...)
+			optionalHints = append([]string{"F3 context"}, optionalHints...)
 		}
 	}
+	priorityHints := []string{}
 	if strings.TrimSpace(m.copyNotice) != "" {
-		hints = append(hints, m.copyNotice)
+		priorityHints = append(priorityHints, m.copyNotice)
 	}
-	settingsHint := lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(hints, "  "))
-	rightFooter := modelStyle.Render(valueOr(m.model, "routed")) + "  " + settingsHint + " "
+	priorityHints = append(priorityHints, copyHint, posHint, sidebarHint)
+	rightPlain := buildFooterRightPlain(valueOr(m.model, "routed"), priorityHints, optionalHints, max(10, m.width))
+	leftPlain, rightPlain = fitFooterPlain(leftPlain, rightPlain, max(10, m.width))
+	if overflow := lipgloss.Width(leftPlain) + lipgloss.Width(rightPlain) - max(10, m.width); overflow > 0 {
+		rightPlain = shorten(rightPlain, max(0, lipgloss.Width(rightPlain)-overflow))
+	}
 
-	// Gradient separator
-	sepWidth := max(10, m.width)
-	gradColors := []string{"#7C3AED", "#6366F1", "#3B82F6", "#0EA5E9", "#06B6D4", "#0EA5E9", "#3B82F6", "#6366F1", "#7C3AED"}
-	var sepBuilder strings.Builder
-	for i := 0; i < sepWidth; i++ {
-		colorIdx := i * len(gradColors) / sepWidth
-		if colorIdx >= len(gradColors) {
-			colorIdx = len(gradColors) - 1
+	leftFooter := cmdHintStyle.Render(leftPlain)
+	if leftPlain == originalLeftPlain {
+		var leftRenderedParts []string
+		for _, part := range leftParts {
+			leftRenderedParts = append(leftRenderedParts, cmdSlashStyle.Render("/")+cmdHintStyle.Render(strings.TrimPrefix(part, "/")))
 		}
-		sepBuilder.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(gradColors[colorIdx])).Render("─"))
+		leftFooter = " " + strings.Join(leftRenderedParts, "  ")
 	}
-	separator := sepBuilder.String()
+	rightFooter := modelStyle.Render(rightPlain)
 
-	return lipgloss.JoinVertical(lipgloss.Left, separator, leftFooter+strings.Repeat(" ", max(0, m.width-lipgloss.Width(leftFooter)-lipgloss.Width(rightFooter)))+rightFooter)
+	separator := lipgloss.NewStyle().
+		Foreground(colorBrandDim).
+		Render(strings.Repeat("─", max(8, m.width-2)))
+
+	gap := max(0, m.width-lipgloss.Width(leftFooter)-lipgloss.Width(rightFooter))
+	return lipgloss.JoinVertical(lipgloss.Left, separator, leftFooter+strings.Repeat(" ", gap)+rightFooter)
+}
+
+func fitFooterPlain(left, right string, width int) (string, string) {
+	width = max(8, width-2)
+	left = strings.TrimRight(left, " ")
+	right = strings.TrimRight(right, " ")
+	if lipgloss.Width(left)+lipgloss.Width(right) <= width {
+		return left, right
+	}
+
+	leftMax := max(12, width/3)
+	if lipgloss.Width(left) > leftMax {
+		left = shorten(left, leftMax)
+	}
+	remaining := width - lipgloss.Width(left) - 1
+	if remaining < 8 {
+		left = shorten(left, max(6, width/4))
+		remaining = width - lipgloss.Width(left) - 1
+	}
+	if remaining < 4 {
+		return "", shorten(right, width)
+	}
+	if lipgloss.Width(right) > remaining {
+		right = shorten(right, remaining)
+	}
+	if lipgloss.Width(left)+lipgloss.Width(right) > width {
+		left = shorten(left, max(0, width-lipgloss.Width(right)-1))
+	}
+	return left, right
+}
+
+func buildFooterRightPlain(model string, priorityHints, optionalHints []string, width int) string {
+	parts := []string{model}
+	for _, hint := range priorityHints {
+		hint = strings.TrimSpace(hint)
+		if hint != "" {
+			candidate := append(append([]string(nil), parts...), hint)
+			if lipgloss.Width(strings.Join(candidate, "  ")) <= width {
+				parts = candidate
+			}
+		}
+	}
+	for _, hint := range optionalHints {
+		hint = strings.TrimSpace(hint)
+		if hint == "" {
+			continue
+		}
+		candidate := append(append([]string(nil), parts...), hint)
+		if lipgloss.Width(strings.Join(candidate, "  ")) > width {
+			continue
+		}
+		parts = candidate
+	}
+	return strings.Join(parts, "  ") + " "
 }
 
 // ---------------------------------------------------------------------------

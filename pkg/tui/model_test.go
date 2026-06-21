@@ -144,6 +144,25 @@ func TestSidebarViewFitsTerminalWidth(t *testing.T) {
 	}
 }
 
+func TestFooterFitsNarrowTerminalWidth(t *testing.T) {
+	model := New(Config{
+		Model:        "gpt-5.5-super-long-model-name",
+		SidebarFiles: []string{"README.md"},
+	})
+	model.width = 72
+	model.height = 20
+	model.copyNotice = "copied 12345 chars"
+	model.syncViewport(true)
+
+	footer := model.renderFooter()
+	for i, line := range strings.Split(footer, "\n") {
+		visible := strings.TrimRight(stripANSI(line), " ")
+		if width := lipgloss.Width(visible); width > model.width {
+			t.Fatalf("footer line %d overflows width: got %d want <= %d\n%s", i, width, model.width, visible)
+		}
+	}
+}
+
 func TestThinkingBarKeepsStableWidth(t *testing.T) {
 	model := New(Config{})
 	model.spinnerFrame = 0
@@ -1440,6 +1459,27 @@ func TestCopyModeDragCopiesSelectionToClipboard(t *testing.T) {
 	}
 	if !strings.Contains(stripANSI(m.renderFooter()), "copied") {
 		t.Fatalf("expected copy notification in footer, got %q", stripANSI(m.renderFooter()))
+	}
+}
+
+func TestSidebarScrollDownUsesViewportHeightAwareLimit(t *testing.T) {
+	model := New(Config{
+		SidebarFiles: []string{
+			"a.go", "b.go", "c.go", "d.go", "e.go", "f.go", "g.go", "h.go", "i.go", "j.go",
+			"k.go", "l.go", "m.go", "n.go", "o.go", "p.go", "q.go", "r.go", "s.go", "t.go",
+		},
+	})
+	model.width = 120
+	model.height = 16
+	model.syncViewport(true)
+
+	for i := 0; i < 50; i++ {
+		model.sidebarScrollDown(1)
+	}
+
+	maxScroll := model.sidebarMaxScrollForContent(model.viewport.Height, model.sidebarContentLineCount(), 3, 2)
+	if model.sidebarScroll != maxScroll {
+		t.Fatalf("unexpected sidebar max scroll: got %d want %d", model.sidebarScroll, maxScroll)
 	}
 }
 
